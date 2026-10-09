@@ -103,6 +103,7 @@ RUN if [ "$USE_MIRROR" = "true" ] || ( [ "$USE_MIRROR" = "auto" ] && ! timeout 3
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    jq \
     libssl3 \
     libsqlite3-0 \
     ca-certificates \
@@ -130,5 +131,7 @@ EXPOSE 8045
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://127.0.0.1:8045/health || exit 1
 
-# Run the application in headless mode
-ENTRYPOINT ["/app/antigravity-tools", "--headless"]
+# Restore a configured public tunnel after container restarts.
+COPY docker/portal-entrypoint.sh /app/portal-entrypoint.sh
+RUN chmod 0755 /app/portal-entrypoint.sh
+ENTRYPOINT ["/app/portal-entrypoint.sh"]

@@ -87,4 +87,4 @@ cargo run --manifest-path src-tauri/crates/portal/Cargo.toml --example preview
 
 `docker/docker-compose.portal.yml` 提供独立开发部署，默认绑定本机 8046，与原有 8045 服务隔离。先在副本数据中验证，数据库迁移与服务行为确认后再切换入口。业务库升级后不能直接用旧版本覆盖新库；回滚时恢复对应版本的镜像与数据快照。
 
-现有 Cloudflare 入口需要允许用户页及 `/portal/api/*`；支付回调必须可从支付平台访问。API 域名继续仅转发已允许的 AI 路径。管理员入口使用 `/admin`，管理 API 仍在 `/api/*` 并受原强制鉴权保护。网关进程重启后需核验现有命名 Cloudflared 隧道状态。
+现有 Cloudflare 入口需要允许用户页及 `/portal/api/*`；支付回调必须可从支付平台访问。API 域名继续仅转发已允许的 AI 路径。管理员入口使用 `/admin`，管理 API 仍在 `/api/*` 并受原强制鉴权保护。Docker 启动脚本会在应用健康检查通过后恢复已启用的 Cloudflared 隧道；不向进程参数或日志写入管理员密码和隧道 token。切换后仍需检查公网入口与隧道状态。
