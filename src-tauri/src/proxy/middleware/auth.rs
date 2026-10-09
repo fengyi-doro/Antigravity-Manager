@@ -56,45 +56,19 @@ async fn auth_middleware_internal(
     let security = security.read().await.clone();
     let effective_mode = security.effective_auth_mode();
 
+    // Portal credentials always require user ownership and quota checks, including
+    // when the legacy global auth switch is Off. They never authorize admin APIs.
+    if !force_strict
+        && antigravity_portal::proxy::api_key(&request)
+            .is_some_and(|key| key.starts_with("sk-portal-"))
+    {
+        return Ok(antigravity_portal::proxy::handle(request, next).await);
+    }
+
     // 权限检查逻辑
     if !force_strict {
-        // AI 代理接口 (v1/chat/completions 等)
-        if matches!(effective_mode, ProxyAuthMode::Off) {
-            // [FIX] 即使 auth_mode=Off，也需要尝试识别 User Token 以记录使用情况
-            // 先检查是否携带了 User Token
-            let api_key = request
-                .headers()
-                .get(header::AUTHORIZATION)
-                .and_then(|h| h.to_str().ok())
-                .and_then(|s| s.strip_prefix("Bearer ").or(Some(s)))
-                .or_else(|| {
-                    request
-                        .headers()
-                        .get("x-api-key")
-                        .and_then(|h| h.to_str().ok())
-                });
-
-            if let Some(token) = api_key {
-                // 尝试验证是否为 User Token（不阻止请求，只记录）
-                if let Ok(Some(user_token)) =
-                    crate::modules::user_token_db::get_token_by_value(token)
-                {
-                    let identity = UserTokenIdentity {
-                        token_id: user_token.id,
-                        token: user_token.token,
-                        username: user_token.username,
-                    };
-                    // 注入 identity 到请求
-                    let (mut parts, body) = request.into_parts();
-                    parts.extensions.insert(identity);
-                    let request = Request::from_parts(parts, body);
-                    return Ok(next.run(request).await);
-                }
-            }
-
-            return Ok(next.run(request).await);
-        }
-
+        // A billing-enabled build must fail closed even if portal initialization
+        // fails. The legacy Off switch cannot expose anonymous generation.
         if matches!(effective_mode, ProxyAuthMode::AllExceptHealth) && is_health_check {
             return Ok(next.run(request).await);
         }

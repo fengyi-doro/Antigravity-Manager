@@ -27,6 +27,7 @@ function Navbar() {
         { path: '/apikey-fun', label: t('nav.apikey_fun', '中转站'), icon: KeyRound, priority: 'high' },
         { path: '/monitor', label: t('nav.call_records'), icon: Activity, priority: 'medium' },
         { path: '/token-stats', label: t('nav.token_stats', 'Token 统计'), icon: BarChart3, priority: 'low' },
+        ...(!isTauri() ? [{ path: '/portal-users', label: '注册用户', icon: Users, priority: 'low' as const }] : []),
         { path: '/user-token', label: t('nav.user_token', 'User Tokens'), icon: Users, priority: 'low' },
         { path: '/security', label: t('nav.security'), icon: Lock, priority: 'low' },
         { path: '/settings', label: t('nav.settings'), icon: Settings, priority: 'high' },

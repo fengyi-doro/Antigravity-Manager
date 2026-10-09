@@ -28,6 +28,7 @@ dist
 
 # Build output
 src-tauri/target/
+src-tauri/crates/*/target/
 src-tauri/gen/
 src-tauri/.env
 
@@ -70,3 +71,5 @@ docs/CODEBASE_ALIGNMENT_ANALYSIS.md
 
 # Captured payload samples (contain real thought signatures — never push)
 testJson/
+
+!docker/.env.portal.example

@@ -1,0 +1,90 @@
+# 用户中心、额度与在线充值
+
+用户中心入口为 `/console`（网页根路径也显示用户中心），注册页为 `/register`，管理员入口为 `/admin`。Web 管理员导航增加“注册用户”，可停用用户、查看余额、处理待对账请求。桌面应用继续使用原管理员界面。
+
+## 额度规则
+
+- 每个账号注册时仅发放一次 5,000,000 token，当天北京时间 24:00 到期。
+- 充值比例固定为人民币 1 元 = 1,000,000 token，金额以整数分存储；套餐为 1、10、50、100 元。
+- 优先使用未过期的注册赠送额度，充值额度长期有效。
+- API Key 属于用户，重置 Key 不会重置额度；完整密钥只在创建时返回，数据库保存随机密钥的 SHA-256 摘要。
+- 密码使用 Argon2id 加盐摘要；登录使用 HttpOnly、SameSite=Strict 会话 Cookie，HTTPS 下设置 Secure。修改操作同时验证 Origin 和会话 CSRF token。
+- 本版邮箱用于登录标识，尚不发送验证邮件或密码找回邮件。注册接口按来源地址限流；正式开放前应结合实际用户规模设置入口防滥用策略。
+
+## 本地业务数据库
+
+新增 `portal.db`，位于现有应用数据目录，使用独立版本号迁移、SQLite WAL、外键与事务。账号、密钥、赠送/充值额度、预留分配、请求结算、额度流水、订单、支付事件、审计记录同库保存。
+
+赠送到账、请求预留、请求结算、订单到账分别使用写事务，唯一约束阻止重复赠送及重复付款入账。额度到期在余额查询、预留和结算时处理，保留到期流水。重启时将未完成请求标为待对账，不自动退还可能已经被上游消耗的额度。
+
+现有 `user_tokens.db` 属于旧管理员令牌功能，不自动按旧的 username 标签创建网站账户。原管理员密码和主 API Key 不作为网站用户凭据。此版本关闭旧全局鉴权开关也不会开放匿名 AI 调用；用户中心初始化失败时同样拒绝匿名调用。
+
+## 支持的计费请求与边界
+
+- 支持白名单模型的 OpenAI Chat Completions、Responses（HTTP）、Claude Messages、Gemini generateContent/streamGenerateContent 文本请求。
+- 输入、输出按 token 1:1 扣减，缓存属于输入，思考属于输出，避免在总数外再次叠加。
+- 请求最多 1 MiB，默认输出预算 4096，客户端可显式设置 1–65536。文本输入按序列化 UTF-8 字节上界加 65536 预留，用于容纳网关添加的上下文；正常结算释放未用部分。
+- 统一上游客户端在参数归一化后再次限制输出和思考预算，并检查最终输入大小。一个用户请求只允许一次上游生成调用；自动重试、辅助摘要生成不允许额外消费这笔预算。
+- 本版用户 Key 不开放图片、音视频、WebSocket、服务端历史引用或搜索工具。请携带完整文本历史。管理员与旧令牌的协议功能不受该计费白名单限制。
+- 正常完整响应按实际 usage 结算。响应中断、缺少完整 usage、未知上游失败均保留预留，等待管理员对账；已知未发送或明确被上游拒绝的请求释放预留。
+- 如上游用量超出已预留额度，超出部分继续扣除可用余额，不足部分记为欠额并阻止继续消费；后续充值先补足欠额。不会丢弃超出的用量记录。
+- 不支持凭日志开关控制扣费。用户中心的计费流程独立于原调用日志功能。
+
+## 环境变量
+
+复制 `docker/.env.portal.example` 到未纳入版本控制的部署配置中。
+
+| 变量 | 用途 |
+| --- | --- |
+| `ABV_PORTAL_PUBLIC_URL` | 用户中心公开源站地址，例如 `https://console.example.com`，不带路径。HTTP 仅限 loopback 开发测试。 |
+| `ABV_PORTAL_API_BASE_URL` | 用户页面显示的 OpenAI 兼容地址，例如 `https://api.example.com/v1`。 |
+| `ABV_PORTAL_ALLOWED_MODELS` | 逗号分隔的、已经验证可按 token 计量的模型 ID；默认空列表，禁止用户付费调用未配置模型。 |
+| `ABV_PORTAL_REGISTRATION_OPEN` | `false` 暂停注册；已有用户可继续登录。 |
+| `ABV_PORTAL_TRUST_PROXY` | 仅在入口保证覆盖客户端 IP 头且容器不直接暴露时设置 `true`；使用 CF-Connecting-IP / X-Real-IP 进行注册限流。 |
+| `ABV_EPAY_URL` | 易支付 V1 兼容网关根地址，必须 HTTPS；不预设商户服务商。 |
+| `ABV_EPAY_PID` | 已开通微信、支付宝收款的商户号。 |
+| `ABV_EPAY_KEY` | 商户签名密钥，仅后端读取。 |
+| `WEB_PASSWORD` / `API_KEY` | 保留现有管理员密码和主 API Key 配置，不能使用网站用户 Key 替代。 |
+
+支付参数未完整配置时，页面显示“充值暂未开放”，服务端拒绝创建支付订单。不会使用虚假支付成功状态或自动赠送替代实际充值。
+
+## 支付接入
+
+实现的是易支付 V1 **协议适配器**，不包含收款商户开户；网关运营方和商户资质由部署者配置。支持 `wxpay`（微信）与 `alipay`（支付宝）。协议依据：[页面支付、通知、签名与订单查询文档](https://pay.xr876.cn/doc/v1_legacy_api.html)。
+
+1. 用户选择套餐，服务端保存不可变订单金额、购买额度、用户和支付方式。
+2. 服务端生成签名后的 `submit.php` POST 表单，浏览器跳转收银台。
+3. 支付平台通知 `${ABV_PORTAL_PUBLIC_URL}/portal/api/payments/notify`。只有签名、商户号、订单、渠道、金额及 TRADE_SUCCESS 全部正确时才入账。
+4. 支付返回 `/console?order=...` 后查询服务器；前端跳转不是到账依据。
+5. 回调延迟时，用户可点击“核对到账”。服务器经 HTTPS 使用商户凭据主动查询原网关，核对后补单。跨用户订单查询会被拒绝。
+6. 商户交易号和订单号有唯一约束；并发或重复通知只入账一次。查询不跟随 HTTP 重定向，避免商户密钥被带到其他来源。
+
+正式收款需用实际商户完成小额支付、回调、查询与对账验证。当前未接入自动退款；退款涉及已消耗额度，应由管理员核对支付平台及账本后处理，不能直接删除订单。
+
+## 开发与测试
+
+业务库可独立于 Tauri 测试：
+
+```bash
+cargo test --manifest-path src-tauri/crates/portal/Cargo.toml
+npx tsc --noEmit
+npm run build
+```
+
+本机 UI/API 预览（独立数据、仅监听 127.0.0.1:18046，不提供 AI 代理或管理员 API）：
+
+```bash
+PORTAL_PREVIEW_DATA=/tmp/antigravity-portal-preview \
+PORTAL_PREVIEW_DIST="$PWD/dist" \
+ABV_PORTAL_PUBLIC_URL=http://127.0.0.1:18046 \
+ABV_PORTAL_ALLOWED_MODELS=gemini-3-flash \
+cargo run --manifest-path src-tauri/crates/portal/Cargo.toml --example preview
+```
+
+测试覆盖：赠送唯一性、北京时间边界、Key 撤销、账号停用、并发预留、到期后释放、重启待对账、超额欠额、支付通知验签、重复到账、订单归属、Cookie/CSRF、最终上游预算及协议用量归一。
+
+## Docker 部署与恢复
+
+`docker/docker-compose.portal.yml` 提供独立开发部署，默认绑定本机 8046，与原有 8045 服务隔离。先在副本数据中验证，数据库迁移与服务行为确认后再切换入口。业务库升级后不能直接用旧版本覆盖新库；回滚时恢复对应版本的镜像与数据快照。
+
+现有 Cloudflare 入口需要允许用户页及 `/portal/api/*`；支付回调必须可从支付平台访问。API 域名继续仅转发已允许的 AI 路径。管理员入口使用 `/admin`，管理 API 仍在 `/api/*` 并受原强制鉴权保护。网关进程重启后需核验现有命名 Cloudflared 隧道状态。

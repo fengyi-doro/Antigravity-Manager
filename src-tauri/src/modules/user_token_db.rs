@@ -593,6 +593,9 @@ pub fn validate_token(token_str: &str, ip: &str) -> Result<(bool, Option<String>
     let token_opt = get_token_by_value(token_str)?;
 
     if let Some(token) = token_opt {
+        if !token.enabled {
+            return Ok((false, Some("This API key has been disabled.".to_string())));
+        }
         // 1. 检查过期时间
         if token.expires_type != "never" {
             if let Some(expires_at) = token.expires_at {

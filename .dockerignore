@@ -2,6 +2,7 @@ target/
 node_modules/
 .git/
 src-tauri/target/
+src-tauri/crates/*/target/
 src-tauri/bin/
 *.deb
 *.app
@@ -10,3 +11,5 @@ src-tauri/bin/
 .vscode/
 .idea/
 .DS_Store
+
+.portal-data/
