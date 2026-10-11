@@ -95,7 +95,7 @@ export default function AdminPortal() {
     }
   }
   return (
-    <div className="flex-1 overflow-auto p-6 space-y-6">
+    <div className="flex-1 min-w-0 overflow-auto p-6 space-y-6">
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-2xl font-semibold">注册用户</h1>
@@ -119,21 +119,21 @@ export default function AdminPortal() {
       <section className="rounded-xl border border-base-300 bg-base-100 p-5 space-y-4" aria-labelledby="portal-models-title">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 id="portal-models-title" className="text-lg font-medium">用户模型白名单</h2>
-          {modelsLoaded && <span className="badge badge-outline">当前开放 {models.length} 个模型</span>}
+          {modelsLoaded && <span className="rounded-full border border-base-300 px-3 py-1 text-xs">当前开放 {models.length} 个模型</span>}
         </div>
         <p className="text-sm opacity-70">
           适用于所有用户中心 API Key。填写完整模型 ID，每行一个，也可用逗号分隔。保存后立即生效。
         </p>
         {modelsLoaded && models.length > 0 && (
           <div className="flex flex-wrap gap-2" aria-label="当前开放模型">
-            {models.map((model) => <span key={model} className="badge badge-ghost h-auto py-1 break-all">{model}</span>)}
+            {models.map((model) => <span key={model} className="rounded-md bg-base-200 px-2 py-1 text-xs break-all">{model}</span>)}
           </div>
         )}
         <form onSubmit={(event) => { event.preventDefault(); void saveModels(); }} className="space-y-3">
           <label className="block text-sm font-medium" htmlFor="portal-allowed-models">开放的模型 ID</label>
           <textarea
             id="portal-allowed-models"
-            className="textarea textarea-bordered w-full min-h-32 font-mono text-sm"
+            className="w-full min-h-32 rounded-lg border border-base-300 bg-base-100 px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-60"
             rows={4}
             maxLength={40_200}
             value={modelDraft}
@@ -146,21 +146,21 @@ export default function AdminPortal() {
             请使用已接入且支持文本调用的模型 ID；加入白名单后，还需确保上游账号支持该模型。最多 200 个模型。
           </p>
           {modelsLoaded && draftModels.length === 0 && (
-            <p className="text-warning text-sm" role="status">名单为空时，所有用户中心 Key 将无法调用模型。</p>
+            <p className="text-amber-700 dark:text-amber-400 text-sm" role="status">名单为空时，所有用户中心 Key 将无法调用模型。</p>
           )}
-          {modelError && <p role="alert" className="text-error text-sm">{modelError}</p>}
-          {modelNotice && <p role="status" className="text-success text-sm">{modelNotice}</p>}
+          {modelError && <p role="alert" className="text-red-600 dark:text-red-400 text-sm">{modelError}</p>}
+          {modelNotice && <p role="status" className="text-emerald-700 dark:text-emerald-400 text-sm">{modelNotice}</p>}
           <div className="flex flex-wrap gap-2">
-            <button className="btn btn-primary btn-sm" disabled={!modelsLoaded || savingModels || !modelsChanged}>
+            <button className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50" disabled={!modelsLoaded || savingModels || !modelsChanged}>
               {savingModels ? "保存中…" : "保存白名单"}
             </button>
             {modelsLoaded ? (
-              <button type="button" className="btn btn-ghost btn-sm" disabled={savingModels || !modelsChanged}
+              <button type="button" className="rounded-lg border border-base-300 px-4 py-2 text-sm hover:bg-base-200 disabled:cursor-not-allowed disabled:opacity-50" disabled={savingModels || !modelsChanged}
                 onClick={() => { setModelDraft(models.join("\n")); setModelError(""); setModelNotice(""); }}>
                 撤销修改
               </button>
             ) : modelError && (
-              <button type="button" className="btn btn-sm" onClick={() => {
+              <button type="button" className="rounded-lg border border-base-300 px-4 py-2 text-sm hover:bg-base-200" onClick={() => {
                 setModelError(""); void loadModels().catch((e) => setModelError(e.message));
               }}>重新读取</button>
             )}
