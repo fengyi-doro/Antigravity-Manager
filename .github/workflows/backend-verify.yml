@@ -57,6 +57,7 @@ jobs:
           if [ ! -e dist/index.html ]; then
             printf '<!doctype html><title>Headless backend build</title>\n' > dist/index.html
           fi
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git rev-parse HEAD > artifact/source-revision.txt
           git diff --exit-code
           rustc --version
