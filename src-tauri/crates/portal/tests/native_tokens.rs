@@ -43,7 +43,7 @@ fn account_keys_use_original_creation_validation_rotation_and_usage() {
     assert_eq!(snapshot["key"]["usage"][0]["input_tokens"], 12345);
     assert_eq!(snapshot["key"]["usage"][0]["output_tokens"], 678);
     assert!(snapshot["key"].get("token").is_none());
-    assert_eq!(snapshot["billing_enabled"], false);
+    assert_eq!(snapshot["billing_enabled"], true);
     assert_eq!(snapshot["legacy"]["available"], 0);
 
     native::update_token(&token.id, None, None, Some(false), None, None, None).unwrap();
@@ -112,7 +112,7 @@ fn existing_accounts_link_once_without_mutating_legacy_financial_records() {
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
     assert_eq!(
         conn.query_row("SELECT enabled FROM api_keys WHERE id='key'", [], |r| r

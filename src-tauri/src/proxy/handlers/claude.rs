@@ -2187,6 +2187,7 @@ pub async fn handle_messages(
 
                 // 解包 response 字段（v1internal 格式）
                 let raw = gemini_resp.get("response").unwrap_or(&gemini_resp);
+                crate::proxy::pipeline::capture_upstream_usage(raw);
 
                 // 转换为 Gemini Response 结构
                 let gemini_response: crate::proxy::mappers::claude::models::GeminiResponse =

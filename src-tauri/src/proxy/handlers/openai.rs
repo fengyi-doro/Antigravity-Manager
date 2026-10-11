@@ -2697,6 +2697,7 @@ pub async fn handle_chat_completions(
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Parse error: {}", e)))?;
 
+            crate::proxy::pipeline::capture_upstream_usage(&gemini_resp);
             crate::proxy::thinking_store::capture_gemini_response(&session_id, &gemini_resp);
 
             // [CACHE] 从 Gemini 响应中提取缓存信息，关闭反馈循环
@@ -4616,6 +4617,7 @@ pub async fn handle_completions(
                 }
             };
 
+            crate::proxy::pipeline::capture_upstream_usage(&gemini_resp);
             crate::proxy::thinking_store::capture_gemini_response(&session_id_str, &gemini_resp);
 
             let chat_resp = transform_openai_response(
@@ -5217,6 +5219,9 @@ pub async fn handle_images_generations_internal(
     let max_attempts = crate::proxy::handlers::common::calculate_max_retry_attempts(max_pool_size);
 
     let mut tasks = JoinSet::new();
+    let usage_holder = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
+        .try_with(Clone::clone)
+        .ok();
 
     // Track the last account actually attempted, so error responses (502/503) can be
     // attributed to an account in the traffic log instead of showing "(none)".
@@ -5234,6 +5239,7 @@ pub async fn handle_images_generations_internal(
         let image_scheduler = image_scheduler.clone();
         let affinity_key = affinity_key.clone();
 
+        let usage_holder = usage_holder.clone();
         tasks.spawn(async move {
             let mut image_permit = None;
             let mut last_error = String::new();
@@ -5446,6 +5452,7 @@ pub async fn handle_images_generations_internal(
                         }
                         match response.json::<Value>().await {
                             Ok(json) => {
+                                if let Some(holder) = &usage_holder { holder.capture_additive_usage(&json); }
                                 if response_has_inline_image_data(&json) {
                                     token_manager.commit_session(&affinity_key, &account_id);
                                     token_manager.mark_account_success(&account_id);
@@ -5762,6 +5769,9 @@ pub async fn handle_images_edits(
     let max_attempts = crate::proxy::handlers::common::calculate_max_retry_attempts(max_pool_size);
 
     let mut tasks = JoinSet::new();
+    let usage_holder = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
+        .try_with(Clone::clone)
+        .ok();
     for _ in 0..n {
         let upstream = upstream.clone();
         let token_manager = token_manager.clone();
@@ -5772,6 +5782,7 @@ pub async fn handle_images_edits(
         let image_scheduler = image_scheduler.clone();
         let affinity_key = affinity_key.clone();
 
+        let usage_holder = usage_holder.clone();
         tasks.spawn(async move {
             let mut image_permit = None;
             let mut last_error = String::new();
@@ -5938,6 +5949,9 @@ pub async fn handle_images_edits(
                         }
                         match response.json::<Value>().await {
                             Ok(json) => {
+                                if let Some(holder) = &usage_holder {
+                                    holder.capture_additive_usage(&json);
+                                }
                                 if response_has_inline_image_data(&json) {
                                     token_manager.commit_session(&affinity_key, &account_id);
                                     token_manager.mark_account_success(&account_id);
@@ -6140,11 +6154,17 @@ pub async fn handle_responses_websocket(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
     State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::proxy::middleware::auth::UserTokenIdentity>>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_websocket_session(socket, headers, state))
+    ws.on_upgrade(move |socket| handle_websocket_session(socket, headers, state, identity))
 }
 
-async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, state: AppState) {
+async fn handle_websocket_session(
+    mut socket: WebSocket,
+    headers: HeaderMap,
+    state: AppState,
+    identity: Option<axum::Extension<crate::proxy::middleware::auth::UserTokenIdentity>>,
+) {
     tracing::info!("Codex responses websocket: client connected");
     let mut session_state = WebsocketSessionState {
         last_request: None,
@@ -6247,18 +6267,51 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
         };
 
         let openai_body = convert_codex_to_openai_request(normalized);
-        let response_result = handle_chat_completions(
-            State(state.clone()),
-            headers.clone(),
-            None,
-            None,
-            Json(openai_body),
-        )
-        .await;
+        let holder = crate::proxy::monitor::UpstreamRequestBodyHolder::new();
+        if let Some(identity) = &identity {
+            let token = identity.token_id.clone();
+            let model = openai_body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned();
+            match antigravity_portal::blocking(move || {
+                antigravity_portal::instance()?
+                    .store
+                    .begin_billing(&token, &model)
+            })
+            .await
+            {
+                Ok(id) => holder.set_billing_id(id),
+                Err(error) => {
+                    let response = error.into_response();
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), 16_384)
+                        .await
+                        .unwrap_or_default();
+                    let payload = serde_json::from_slice::<Value>(&bytes).unwrap_or(json!({}));
+                    let _=socket.send(Message::Text(json!({"type":"error","status":status.as_u16(),"error":payload["error"]}).to_string())).await;
+                    continue;
+                }
+            }
+        }
+        let response_result = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
+            .scope(
+                holder.clone(),
+                handle_chat_completions(
+                    State(state.clone()),
+                    headers.clone(),
+                    None,
+                    identity.clone(),
+                    Json(openai_body),
+                ),
+            )
+            .await;
 
         let response = match response_result {
             Ok(res) => res.into_response(),
             Err((status, err_msg)) => {
+                holder.settle_billing(status.as_u16());
                 let error_ev = json!({
                     "type": "error",
                     "error": {
@@ -6273,6 +6326,7 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
         };
 
         if !response.status().is_success() {
+            holder.settle_billing(response.status().as_u16());
             let error_ev = json!({
                 "type": "error",
                 "error": {
@@ -6346,6 +6400,7 @@ async fn handle_websocket_session(mut socket: WebSocket, headers: HeaderMap, sta
             }
         }
 
+        holder.settle_billing(200);
         if !buffer.is_empty() {
             if let Ok(line_str) = std::str::from_utf8(&buffer) {
                 let line = line_str.trim();

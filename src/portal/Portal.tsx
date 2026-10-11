@@ -4,9 +4,11 @@ import "./portal.css";
 type Usage = { id: string; model: string; input_tokens: number | null; output_tokens: number | null; request_time: number; status: number };
 type NativeToken = { id: string; suffix: string; enabled: boolean; expires_at: number | null; total_requests: number; total_tokens_used: number; last_used_at: number | null; usage: Usage[] };
 type Legacy = { paid_available: number; usage: { id: string; model: string; charged: number | null; created_at: number }[]; orders: { id: string; amount_cents: number; state: string; created_at: number }[] };
-type Snapshot = { user: { email: string }; csrf: string; data: { key: NativeToken | null; legacy: Legacy } };
+type Wallet = { enabled: boolean; balance_nano: number; spent_nano: number; usage: { id: string; model: string; input_tokens: number | null; cached_tokens: number | null; output_tokens: number | null; charged_nano: number | null; status: number | null; state: string; created_at: number }[] };
+type Snapshot = { user: { email: string }; csrf: string; data: { key: NativeToken | null; legacy: Legacy; wallet: Wallet } };
 type Config = { registration_open: boolean; api_base_url: string };
 const number = (value: number) => new Intl.NumberFormat("zh-CN").format(value);
+const money = (nano: number) => new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", minimumFractionDigits: 2, maximumFractionDigits: 8 }).format(nano / 1_000_000_000);
 const date = (value: number) => new Date(value * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
 const orderStatus: Record<string, string> = { pending: "待支付", paid: "已到账", closed: "已关闭" };
 
@@ -87,8 +89,9 @@ export default function Portal() {
   const key = snapshot?.data.key;
   const shownKey = fullKey?.id === key?.id ? fullKey?.value : undefined;
   const legacy = snapshot?.data.legacy;
+  const wallet = snapshot?.data.wallet;
   const expired = key?.expires_at != null && key.expires_at <= Date.now() / 1000;
-  const keyStatus = !key ? "尚无密钥" : !key.enabled ? "已停用" : expired ? "已到期" : "正常";
+  const keyStatus = !key ? "尚无密钥" : !key.enabled ? "已停用" : expired ? "已到期" : wallet?.enabled && wallet.balance_nano <= 0 ? "余额不足" : "正常";
   return (
     <div className="portal-app"><div className="portal-shell">
       <header className="portal-header">
@@ -102,11 +105,11 @@ export default function Portal() {
         <main className="portal-auth-layout">
           <div className="portal-auth">
             <div className="portal-eyebrow">开始使用 API</div><h1>{register ? "创建账号" : "欢迎回来"}</h1>
-            <p className="portal-muted">登录后管理 API Key，查看请求记录与 token 用量。</p>
+            <p className="portal-muted">登录后管理 API Key，查看余额与调用费用。</p>
             <form onSubmit={authenticate}>
               <label>邮箱<input type="email" autoComplete="username" required maxLength={254} value={email} onChange={(e) => setEmail(e.target.value)} /></label>
-              <label>密码<input type="password" autoComplete={register ? "new-password" : "current-password"} required minLength={register ? 10 : undefined} maxLength={128} value={password} onChange={(e) => setPassword(e.target.value)} /></label>
-              {register && <label>确认密码<input type="password" autoComplete="new-password" required minLength={10} maxLength={128} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></label>}
+              <label>密码<input type="password" autoComplete={register ? "new-password" : "current-password"} required minLength={register ? 6 : undefined} maxLength={128} value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+              {register && <label>确认密码<input type="password" autoComplete="new-password" required minLength={6} maxLength={128} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></label>}
               <button className="portal-primary" disabled={busy || (register && config?.registration_open === false)}>{busy ? "请稍候…" : register ? "注册" : "登录"}</button>
             </form>
             <button className="portal-text-button" onClick={() => { setRegister(!register); setError(""); window.history.replaceState({}, "", register ? "/console" : "/register"); }}>{register ? "已有账号？登录" : "还没有账号？注册"}</button>
@@ -118,10 +121,16 @@ export default function Portal() {
           <div className="portal-title"><div><div className="portal-eyebrow">我的用量</div><h1>API 调用概览</h1></div>
             <button className="portal-secondary" disabled={busy} onClick={() => perform(async () => { await reload(); })}>刷新</button></div>
           <section className="portal-balance" aria-label="当前密钥用量">
-            <div><span className="portal-muted">累计用量</span><strong>{number(key?.total_tokens_used ?? 0)} <small>token</small></strong><small>当前 API Key 的累计统计</small></div>
-            <div><span className="portal-muted">累计请求</span><strong>{number(key?.total_requests ?? 0)}</strong><small>最近调用：{key?.last_used_at ? date(key.last_used_at) : "暂无"}</small></div>
+            <div><span className="portal-muted">{wallet?.enabled ? "账户余额" : "累计用量"}</span><strong>{wallet?.enabled ? money(wallet.balance_nano) : <>{number(key?.total_tokens_used ?? 0)} <small>token</small></>}</strong><small>{wallet?.enabled ? "余额长期有效 · 联系管理员充值" : "当前 API Key 的累计统计"}</small></div>
+            <div><span className="portal-muted">{wallet?.enabled ? "累计消费" : "累计请求"}</span><strong>{wallet?.enabled ? money(wallet.spent_nano) : number(key?.total_requests ?? 0)}</strong><small>最近调用：{key?.last_used_at ? date(key.last_used_at) : "暂无"}</small></div>
             <div><span className="portal-muted">密钥状态</span><strong>{keyStatus}</strong><small>{key?.expires_at ? `${date(key.expires_at)} 到期` : key ? "长期有效" : "请创建密钥"}</small></div>
           </section>
+          {wallet?.enabled && <section className="portal-section"><h2>计费标准</h2>
+            <div className="portal-record"><span>普通输入，未命中缓存</span><strong>¥0.60 / 百万 token</strong></div>
+            <div className="portal-record"><span>缓存命中的输入</span><strong>¥0.06 / 百万 token</strong></div>
+            <div className="portal-record"><span>输出，包含思考 token</span><strong>¥3.00 / 百万 token</strong></div>
+            <p className="portal-muted">按实际用量扣费，失败请求不收费。所有可用模型采用上述价格。</p>
+          </section>}
           <section className="portal-section"><h2>API 接入</h2>
             <div className="portal-value-row"><div><span className="portal-muted">接口地址</span><code>{config?.api_base_url}</code></div><button className="portal-secondary" onClick={() => perform(() => copy(config?.api_base_url || ""))}>复制地址</button></div>
             <div className="portal-value-row"><div><span className="portal-muted">API Key</span><code>{shownKey || (key ? `sk-••••••••${key.suffix}` : "尚无密钥")}</code></div>
@@ -141,10 +150,13 @@ export default function Portal() {
             <p className="portal-muted">在兼容客户端填写接口地址和 API Key。可用模型通过模型列表接口查询。</p>
           </section>
           <section className="portal-section"><h2>调用记录</h2>
-            <div className="portal-records">{key?.usage.length ? key.usage.map((row) => <div className="portal-record" key={row.id}>
+            {wallet?.enabled ? <div className="portal-records">{wallet.usage.length ? wallet.usage.map((row) => <div className="portal-record" key={row.id}>
+              <div><strong>{row.model}</strong><small>{date(row.created_at)}</small></div>
+              <div><strong>输入 {number(row.input_tokens ?? 0)} · 缓存 {number(row.cached_tokens ?? 0)} · 输出 {number(row.output_tokens ?? 0)}</strong><small>{row.state === "settled" ? `费用 ${money(row.charged_nano ?? 0)}` : row.state === "released" ? "未收费" : row.state === "review" ? "费用待核对" : "调用中"}{row.status != null ? ` · HTTP ${row.status}` : ""}</small></div>
+            </div>) : <p className="portal-empty">还没有调用记录</p>}</div> : <div className="portal-records">{key?.usage.length ? key.usage.map((row) => <div className="portal-record" key={row.id}>
               <div><strong>{row.model || "unknown"}</strong><small>{date(row.request_time)}</small></div>
               <div><strong>输入 {number(row.input_tokens ?? 0)} · 输出 {number(row.output_tokens ?? 0)}</strong><small>HTTP {row.status}</small></div>
-            </div>) : <p className="portal-empty">还没有调用记录</p>}</div>
+            </div>) : <p className="portal-empty">还没有调用记录</p>}</div>}
           </section>
           {legacy && (legacy.paid_available > 0 || legacy.orders.length > 0 || legacy.usage.length > 0) && (
             <details className="portal-section"><summary>历史账户记录</summary>

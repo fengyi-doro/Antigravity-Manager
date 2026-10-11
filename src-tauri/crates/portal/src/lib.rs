@@ -1,4 +1,5 @@
 //! User identities linked to the application's original user-token implementation.
+pub mod billing;
 pub mod db;
 pub mod http;
 pub mod native;
@@ -21,6 +22,7 @@ pub enum Error {
     Invalid(String),
     Unauthorized,
     Forbidden,
+    InsufficientBalance,
     Conflict,
     Unavailable(String),
     Internal(String),
@@ -41,6 +43,11 @@ impl IntoResponse for Error {
                 "请重新登录或检查密钥".into(),
             ),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "无权执行此操作".into()),
+            Self::InsufficientBalance => (
+                StatusCode::PAYMENT_REQUIRED,
+                "insufficient_balance",
+                "余额不足，请联系管理员充值".into(),
+            ),
             Self::Conflict => (
                 StatusCode::CONFLICT,
                 "conflict",
@@ -89,6 +96,7 @@ static PORTAL: OnceLock<Arc<Portal>> = OnceLock::new();
 pub fn initialize(data_dir: &Path, tokens: Arc<dyn native::TokenBackend>) -> Result<()> {
     let config = http::Config::from_env()?;
     let store = db::Store::open(data_dir.join("portal.db"))?;
+    store.recover_billing()?;
     let portal = Portal::new(store, config, Some(tokens));
     for user in portal.store.users()? {
         portal.ensure_native_token(&user)?;

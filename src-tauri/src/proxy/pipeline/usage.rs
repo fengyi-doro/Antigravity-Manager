@@ -127,6 +127,10 @@ impl CanonicalUsage {
             raw_output
                 .saturating_add(reasoning)
                 .saturating_add(tool_use)
+        } else if usage.get("candidatesTokenCount").is_some()
+            && usage.get("thoughtsTokenCount").is_some()
+        {
+            raw_output.saturating_add(reasoning)
         } else {
             raw_output
         };

@@ -139,12 +139,13 @@ async fn sessions_csrf_native_keys_and_statistics_remain_isolated() {
     );
 }
 #[tokio::test]
-async fn independent_payment_and_billing_endpoints_are_disabled() {
+async fn billing_prices_are_public_but_online_payment_is_disabled() {
     let (_dir, portal) = common::portal();
     let app = router_with(portal);
     let (_, _, config) = call(&app, "/portal/api/config", "GET", "", "", Value::Null).await;
     assert_eq!(config["payment_enabled"], false);
-    assert_eq!(config["billing_enabled"], false);
+    assert_eq!(config["billing_enabled"], true);
+    assert_eq!(config["pricing"]["cached_per_million"], 0.06);
     for path in [
         "/portal/api/orders",
         "/portal/api/orders/old/reconcile",

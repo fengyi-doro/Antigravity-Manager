@@ -170,6 +170,9 @@ impl ProxyRequestLog {
 pub(crate) struct UpstreamCapture {
     body: Option<String>,
     headers: Option<String>,
+    billing_id: Option<String>,
+    usage: Option<crate::proxy::pipeline::CanonicalUsage>,
+    previous_usage: crate::proxy::pipeline::CanonicalUsage,
 }
 
 #[derive(Clone, Default)]
@@ -180,6 +183,91 @@ tokio::task_local! {
 }
 
 impl UpstreamRequestBodyHolder {
+    /// Preserve usage when the pipeline starts a separate auto-heal generation.
+    pub fn next_usage_call(&self) {
+        if let Ok(mut lock) = self.0.lock() {
+            if let Some(usage) = lock.usage.take() {
+                lock.previous_usage.total_input_tokens = lock
+                    .previous_usage
+                    .total_input_tokens
+                    .saturating_add(usage.total_input_tokens);
+                lock.previous_usage.cached_tokens = lock
+                    .previous_usage
+                    .cached_tokens
+                    .saturating_add(usage.cached_tokens);
+                lock.previous_usage.output_tokens = lock
+                    .previous_usage
+                    .output_tokens
+                    .saturating_add(usage.output_tokens);
+            }
+        }
+    }
+
+    pub fn set_billing_id(&self, id: Option<String>) {
+        if let Ok(mut lock) = self.0.lock() {
+            lock.billing_id = id;
+        }
+    }
+
+    pub fn capture_usage(&self, raw: &serde_json::Value) {
+        let raw = raw.get("response").unwrap_or(raw);
+        if let Some(usage) = raw.get("usageMetadata") {
+            if usage.get("promptTokenCount").is_none() && usage.get("total_input_tokens").is_none()
+            {
+                return;
+            }
+            if let Ok(mut lock) = self.0.lock() {
+                lock.usage = Some(crate::proxy::pipeline::CanonicalUsage::from_gemini(usage));
+            }
+        }
+    }
+
+    /// Image batches perform independent parallel generations under one request.
+    pub fn capture_additive_usage(&self, raw: &serde_json::Value) {
+        let raw = raw.get("response").unwrap_or(raw);
+        if let Some(usage) = raw.get("usageMetadata") {
+            if usage.get("promptTokenCount").is_none() && usage.get("total_input_tokens").is_none()
+            {
+                return;
+            }
+            let usage = crate::proxy::pipeline::CanonicalUsage::from_gemini(usage);
+            if let Ok(mut lock) = self.0.lock() {
+                let total = lock.usage.get_or_insert_with(Default::default);
+                total.total_input_tokens = total
+                    .total_input_tokens
+                    .saturating_add(usage.total_input_tokens);
+                total.cached_tokens = total.cached_tokens.saturating_add(usage.cached_tokens);
+                total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+            }
+        }
+    }
+
+    pub fn settle_billing(&self, status: u16) {
+        if let Ok(lock) = self.0.lock() {
+            if let Some(id) = &lock.billing_id {
+                let result = antigravity_portal::instance().and_then(|portal| {
+                    portal.store.settle_billing(
+                        id,
+                        status,
+                        lock.usage.as_ref().map(|u| {
+                            (
+                                u.total_input_tokens
+                                    .saturating_add(lock.previous_usage.total_input_tokens),
+                                u.cached_tokens
+                                    .saturating_add(lock.previous_usage.cached_tokens),
+                                u.output_tokens
+                                    .saturating_add(lock.previous_usage.output_tokens),
+                            )
+                        }),
+                    )
+                });
+                if let Err(error) = result {
+                    tracing::error!(?error, billing_id=%id, "Usage settlement failed");
+                }
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Self(std::sync::Arc::new(std::sync::Mutex::new(
             UpstreamCapture::default(),

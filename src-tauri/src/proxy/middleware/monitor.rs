@@ -296,7 +296,9 @@ fn record_user_token_usage(
     user_token_identity: &Option<UserTokenIdentity>,
     log: &ProxyRequestLog,
     user_agent: Option<String>,
+    upstream_holder: &UpstreamRequestBodyHolder,
 ) {
+    upstream_holder.settle_billing(log.status);
     if let Some(identity) = user_token_identity {
         let _ = crate::modules::user_token_db::record_token_usage_and_ip(
             &identity.token_id,
@@ -848,6 +850,28 @@ pub async fn monitor_middleware(
     };
 
     let upstream_holder = UpstreamRequestBodyHolder::new();
+    // Count/model discovery endpoints are free. Admission fails closed if accounting is unavailable.
+    if method == "POST"
+        && !uri.contains("count_tokens")
+        && !uri.contains("countTokens")
+        && !uri.starts_with("/v1/thinking/")
+        && !uri.starts_with("/v1/models/detect")
+    {
+        if let Some(identity) = &user_token_identity {
+            let token = identity.token_id.clone();
+            let requested_model = model.clone().unwrap_or_else(|| "unknown".into());
+            let admission = antigravity_portal::blocking(move || {
+                antigravity_portal::instance()?
+                    .store
+                    .begin_billing(&token, &requested_model)
+            })
+            .await;
+            match admission {
+                Ok(id) => upstream_holder.set_billing_id(id),
+                Err(error) => return axum::response::IntoResponse::into_response(error),
+            }
+        }
+    }
     let mut request = request;
     request.extensions_mut().insert(upstream_holder.clone());
 
@@ -1550,7 +1574,12 @@ pub async fn monitor_middleware(
             }
 
             // Record User Token Usage
-            record_user_token_usage(&user_token_identity, &log, user_agent.clone());
+            record_user_token_usage(
+                &user_token_identity,
+                &log,
+                user_agent.clone(),
+                &upstream_holder,
+            );
 
             monitor.log_request(log).await;
         });
@@ -1646,7 +1675,12 @@ pub async fn monitor_middleware(
                 }
 
                 // Record User Token Usage
-                record_user_token_usage(&user_token_identity, &log, user_agent.clone());
+                record_user_token_usage(
+                    &user_token_identity,
+                    &log,
+                    user_agent.clone(),
+                    &upstream_holder,
+                );
 
                 monitor.log_request(log).await;
                 Response::from_parts(parts, Body::from(bytes))
@@ -1655,7 +1689,12 @@ pub async fn monitor_middleware(
                 log.response_body = Some("[Response too large (>100MB)]".to_string());
 
                 // Record User Token Usage (even if too large)
-                record_user_token_usage(&user_token_identity, &log, user_agent.clone());
+                record_user_token_usage(
+                    &user_token_identity,
+                    &log,
+                    user_agent.clone(),
+                    &upstream_holder,
+                );
 
                 monitor.log_request(log).await;
                 Response::from_parts(parts, Body::empty())
@@ -1665,7 +1704,7 @@ pub async fn monitor_middleware(
         log.response_body = Some(format!("[{}]", content_type));
 
         // Record User Token Usage
-        record_user_token_usage(&user_token_identity, &log, user_agent);
+        record_user_token_usage(&user_token_identity, &log, user_agent, &upstream_holder);
 
         monitor.log_request(log).await;
         response

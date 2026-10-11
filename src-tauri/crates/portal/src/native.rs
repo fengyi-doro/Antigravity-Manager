@@ -105,7 +105,9 @@ impl Portal {
             None => None,
         };
         // Values come directly from the native token counters and usage rows.
-        Ok(json!({"billing_enabled":false,"key":token,
-            "legacy":self.store.legacy_dashboard(user)?}))
+        Ok(
+            json!({"billing_enabled":true,"key":token,"wallet":self.store.wallet_dashboard(user)?,
+            "legacy":self.store.legacy_dashboard(user)?}),
+        )
     }
 }

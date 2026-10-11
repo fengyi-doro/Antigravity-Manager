@@ -149,6 +149,9 @@ where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: std::fmt::Display + Send + 'static,
 {
+    let usage_holder = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
+        .try_with(Clone::clone)
+        .ok();
     let stream = async_stream::stream! {
         let mut buffer = BytesMut::new();
         let mut saw_thought = false;
@@ -187,6 +190,7 @@ where
 
                             match serde_json::from_str::<Value>(json_part) {
                                 Ok(mut json) => {
+                                    if let Some(holder) = &usage_holder { holder.capture_usage(&json); }
                                     let has_resp = json.get("response").is_some();
                                     let inner = if has_resp {
                                         json.get_mut("response").unwrap()
@@ -298,6 +302,7 @@ where
 
             match call_res {
                 Ok(call_success) if call_success.response.status().is_success() => {
+                    if let Some(holder) = &usage_holder { holder.next_usage_call(); }
                     tracing::info!(
                         "[{}] [Stream-AutoHeal] ✓ Continuation request succeeded (HTTP 200), piping healed stream directly into client connection...",
                         ctx.trace_id
@@ -317,6 +322,7 @@ where
                                         if line.starts_with("data: ") && line != "data: [DONE]" {
                                             let json_part = line.trim_start_matches("data: ").trim();
                                             if let Ok(json) = serde_json::from_str::<Value>(json_part) {
+                                                if let Some(holder) = &usage_holder { holder.capture_usage(&json); }
                                                 let inner = json.get("response").unwrap_or(&json);
                                                 if let Some(candidates) = inner.get("candidates").and_then(|c| c.as_array()) {
                                                     for cand in candidates {

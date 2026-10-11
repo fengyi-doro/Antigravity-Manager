@@ -152,7 +152,7 @@ fn cookie_header(config: &Config, token: &str, age: i64) -> Result<HeaderValue> 
 }
 async fn config(State(p): State<Arc<Portal>>) -> Result<Json<Value>> {
     Ok(Json(json!({"registration_open":p.config.registration_open,
-        "billing_enabled":false,"payment_enabled":false,"api_base_url":p.config.api_base_url})))
+        "billing_enabled":true,"pricing":crate::billing::pricing(),"payment_enabled":false,"api_base_url":p.config.api_base_url})))
 }
 
 #[derive(Deserialize)]
@@ -286,7 +286,7 @@ async fn billing_disabled() -> Response {
     (
         StatusCode::GONE,
         Json(json!({"error":{"code":"billing_disabled",
-        "message":"独立充值和扣费已停用，当前使用原版用户 Token"}})),
+        "message":"在线支付尚未开启，请联系管理员充值"}})),
     )
         .into_response()
 }
@@ -296,7 +296,48 @@ pub fn admin_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
         .route("/portal/users", get(admin_users))
         .route("/portal/users/:id", get(admin_user).patch(admin_enable))
-        .route("/portal/requests/:id/settle", post(billing_disabled))
+        .route("/portal/users/:id/credits", post(admin_credit))
+        .route("/portal/requests/:id/settle", post(admin_settle))
+}
+#[derive(Deserialize)]
+struct CreditInput {
+    amount_cents: i64,
+    reference: String,
+}
+#[derive(Deserialize)]
+struct SettlementInput {
+    status: u16,
+    input_tokens: u32,
+    cached_tokens: u32,
+    output_tokens: u32,
+}
+async fn admin_settle(
+    Path(id): Path<String>,
+    Json(body): Json<SettlementInput>,
+) -> Result<StatusCode> {
+    let p = instance()?;
+    if body.cached_tokens > body.input_tokens || !(200..=599).contains(&body.status) {
+        return Err(Error::Invalid("无效的用量或状态".into()));
+    }
+    blocking(move || {
+        p.store.audit("billing_reconcile", &id, &json!({"status":body.status,"input_tokens":body.input_tokens,"cached_tokens":body.cached_tokens,"output_tokens":body.output_tokens}).to_string())?;
+        p.store.settle_billing(&id,body.status,Some((body.input_tokens,body.cached_tokens,body.output_tokens)))
+    }).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn admin_credit(
+    Path(id): Path<String>,
+    Json(body): Json<CreditInput>,
+) -> Result<Json<Value>> {
+    let p = instance()?;
+    Ok(Json(
+        blocking(move || {
+            p.store
+                .credit_wallet(&id, body.amount_cents, &body.reference)?;
+            p.store.wallet_dashboard(&id)
+        })
+        .await?,
+    ))
 }
 async fn admin_users() -> Result<Json<Value>> {
     let p = instance()?;

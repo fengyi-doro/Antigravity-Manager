@@ -20,3 +20,9 @@ pub use estimator::{estimate_tokens, PipelineTokenEstimator};
 pub use inbound::{extract_client_thinking_switch, InboundThinkingPipeline};
 pub use policy::UpstreamClassification;
 pub use usage::CanonicalUsage;
+
+/// Capture raw upstream usage before any client display scaling or protocol conversion.
+pub fn capture_upstream_usage(raw: &serde_json::Value) {
+    let _ = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
+        .try_with(|holder| holder.capture_usage(raw));
+}

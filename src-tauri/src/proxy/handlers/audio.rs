@@ -145,6 +145,7 @@ pub async fn handle_audio_transcription(
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("解析响应失败: {}", e)))?;
 
     // 9. 提取文本响应（解包 v1internal 响应）
+    crate::proxy::pipeline::capture_upstream_usage(&result);
     let inner_response = result.get("response").unwrap_or(&result);
     let text = inner_response
         .get("candidates")

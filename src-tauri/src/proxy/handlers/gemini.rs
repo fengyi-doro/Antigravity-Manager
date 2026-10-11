@@ -893,6 +893,7 @@ pub async fn handle_generate(
                 .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Parse error: {}", e)))?;
 
             // [FIX #1522] Inject Tool ID into Non-streaming Response
+            crate::proxy::pipeline::capture_upstream_usage(&gemini_resp);
             crate::proxy::mappers::gemini::wrapper::inject_ids_to_response(
                 &mut gemini_resp,
                 &mapped_model,

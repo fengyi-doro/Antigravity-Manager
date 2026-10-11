@@ -61,7 +61,7 @@ impl Store {
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         match version {
             0 => tx.execute_batch(include_str!("schema.sql"))?,
-            1 | 2 | 3 => (),
+            1..=4 => (),
             _ => return Err(Error::Internal("Unsupported portal schema version".into())),
         }
         if version < 2 {
@@ -69,6 +69,9 @@ impl Store {
         }
         if version < 3 {
             tx.execute_batch(include_str!("native_tokens.sql"))?;
+        }
+        if version < 4 {
+            tx.execute_batch(include_str!("billing.sql"))?;
         }
         tx.commit()?;
         #[cfg(unix)]
@@ -79,7 +82,7 @@ impl Store {
         }
         Ok(store)
     }
-    fn connect(&self) -> Result<Connection> {
+    pub(crate) fn connect(&self) -> Result<Connection> {
         let conn = Connection::open(&self.path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", true)?;
@@ -93,10 +96,10 @@ impl Store {
             || email.starts_with('@')
             || email.ends_with('@')
             || email.chars().any(char::is_whitespace)
-            || !(10..=128).contains(&password.len())
+            || !(6..=128).contains(&password.len())
         {
             return Err(Error::Invalid(
-                "请输入有效邮箱，密码长度为 10–128 字节".into(),
+                "请输入有效邮箱，密码长度为 6–128 字节".into(),
             ));
         }
         let hash = Argon2::default()
@@ -122,6 +125,7 @@ impl Store {
             "INSERT INTO users(id,email,password_hash,created_at) VALUES(?1,?2,?3,?4)",
             params![user.id, user.email, hash, time],
         )?;
+        tx.execute("INSERT INTO wallets(user_id) VALUES(?1)", [&user.id])?;
         tx.commit()?;
         Ok(user)
     }
@@ -226,11 +230,18 @@ impl Store {
             .optional()?)
     }
     pub fn link_native_token(&self, user: &str, token: &str) -> Result<()> {
-        self.connect()?.execute(
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO native_token_links(user_id,token_id) VALUES(?1,?2)
              ON CONFLICT(user_id) DO UPDATE SET token_id=excluded.token_id",
             params![user, token],
         )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO billing_token_owners(token_id,user_id) VALUES(?1,?2)",
+            params![token, user],
+        )?;
+        tx.commit()?;
         Ok(())
     }
     pub fn legacy_dashboard(&self, user: &str) -> Result<Value> {
@@ -294,7 +305,7 @@ impl Store {
             "SELECT id,email,enabled,created_at FROM users ORDER BY created_at DESC LIMIT 200",
         )?;
         let users=stmt.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"email":r.get::<_,String>(1)?,"enabled":r.get::<_,bool>(2)?,"created_at":r.get::<_,i64>(3)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
-        Ok(json!({"users":users,"billing_enabled":false}))
+        Ok(json!({"users":users,"billing_enabled":true}))
     }
     pub fn set_enabled(&self, user: &str, enabled: bool) -> Result<()> {
         let mut conn = self.connect()?;
