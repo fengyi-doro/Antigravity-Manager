@@ -1,6 +1,6 @@
 import { startTransition } from 'react';
 import i18n from '../../i18n';
-import { LayoutDashboard, Users, Network, Activity, BarChart3, Settings, Lock } from 'lucide-react';
+import { LayoutDashboard, Users, Network, Activity, BarChart3, Settings, Lock, FlaskConical } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useConfigStore } from '../../stores/useConfigStore';
 import { isTauri, isLinux } from '../../utils/env';
@@ -24,6 +24,7 @@ function Navbar() {
         { path: '/', label: t('nav.dashboard'), icon: LayoutDashboard, priority: 'high' },
         { path: '/accounts', label: t('nav.accounts'), icon: Users, priority: 'high' },
         { path: '/api-proxy', label: t('nav.proxy'), icon: Network, priority: 'high' },
+        { path: '/api-test', label: t('nav.api_test'), icon: FlaskConical, priority: 'medium' },
         { path: '/monitor', label: t('nav.call_records'), icon: Activity, priority: 'medium' },
         { path: '/token-stats', label: t('nav.token_stats', 'Token 统计'), icon: BarChart3, priority: 'low' },
         ...(!isTauri() ? [{ path: '/portal-users', label: '注册用户', icon: Users, priority: 'low' as const }] : []),
@@ -124,13 +125,15 @@ function Navbar() {
                 {/* Flexbox 布局 - 子组件自己处理响应式 */}
                 <div className="flex items-center h-16 gap-4">
                     {/* Logo - 使用父容器宽度做响应式 */}
-                    <div className="@container/logo basis-[200px] shrink min-w-0">
+                    <div className="@container/logo basis-8 min-[1120px]:basis-[200px] shrink-0 min-w-0">
                         <NavLogo />
                     </div>
 
                     {/* 导航菜单 - 自己处理响应式 */}
-                    <div className="flex-1 flex justify-center">
-                        <NavMenu navItems={navItems} />
+                    <div className="flex-1 min-w-0 min-[880px]:overflow-x-auto">
+                        <div className="flex w-max min-w-full justify-center">
+                            <NavMenu navItems={navItems} />
+                        </div>
                     </div>
 
                     {/* 设置按钮 - 自己处理响应式 */}

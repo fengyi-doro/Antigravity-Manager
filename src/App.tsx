@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import Accounts from './pages/Accounts';
 import Settings from './pages/Settings';
 import ApiProxy from './pages/ApiProxy';
+import ApiTest from './pages/ApiTest';
 import Monitor from './pages/Monitor';
 import TokenStats from './pages/TokenStats';
 import Security from './pages/Security';
@@ -45,6 +46,7 @@ const router = createBrowserRouter([
         path: 'monitor',
         element: <Monitor />,
       },
+      { path: 'api-test', element: <ApiTest /> },
       {
         path: 'token-stats',
         element: <TokenStats />,

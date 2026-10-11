@@ -31,6 +31,9 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
     proxy: {
+      "/portal/api/": { target: "http://127.0.0.1:8045", changeOrigin: true },
+      "/v1/": { target: "http://127.0.0.1:8045", changeOrigin: true },
+      "/v1beta/": { target: "http://127.0.0.1:8045", changeOrigin: true },
       "/api/": {
         target: "http://127.0.0.1:8045",
         changeOrigin: true,
