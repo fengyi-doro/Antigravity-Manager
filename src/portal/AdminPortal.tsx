@@ -9,6 +9,7 @@ type Pending = {
   created_at: number;
 };
 type Summary = { users: User[]; review: Pending[] };
+type ModelSettings = { allowed_models: string[] };
 async function adminApi<T>(
   path: string,
   method = "GET",
@@ -17,6 +18,7 @@ async function adminApi<T>(
   const key = sessionStorage.getItem("abv_admin_api_key") || "";
   const response = await fetch(`/api/portal${path}`, {
     method,
+    cache: "no-store",
     headers: {
       Authorization: `Bearer ${key}`,
       ...(body ? { "Content-Type": "application/json" } : {}),
@@ -33,6 +35,12 @@ export default function AdminPortal() {
   const [summary, setSummary] = useState<Summary>({ users: [], review: [] });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
+  const [modelDraft, setModelDraft] = useState("");
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [savingModels, setSavingModels] = useState(false);
+  const [modelError, setModelError] = useState("");
+  const [modelNotice, setModelNotice] = useState("");
   const [selected, setSelected] = useState<Pending | null>(null);
   const [input, setInput] = useState("0");
   const [output, setOutput] = useState("0");
@@ -44,9 +52,36 @@ export default function AdminPortal() {
   const reload = useCallback(async () => {
     setSummary(await adminApi<Summary>("/users"));
   }, []);
+  const loadModels = useCallback(async () => {
+    const settings = await adminApi<ModelSettings>("/settings");
+    setModelError("");
+    setModels(settings.allowed_models);
+    setModelDraft(settings.allowed_models.join("\n"));
+    setModelsLoaded(true);
+  }, []);
   useEffect(() => {
     reload().catch((e) => setError(e.message));
-  }, [reload]);
+    loadModels().catch((e) => setModelError(e.message));
+  }, [reload, loadModels]);
+  const draftModels = [...new Set(modelDraft.split(/[\n,，]+/).map((model) => model.trim()).filter(Boolean))];
+  const modelsChanged = JSON.stringify(draftModels) !== JSON.stringify(models);
+  async function saveModels() {
+    setSavingModels(true);
+    setModelError("");
+    setModelNotice("");
+    try {
+      const settings = await adminApi<ModelSettings>("/settings", "PUT", {
+        allowed_models: draftModels,
+      });
+      setModels(settings.allowed_models);
+      setModelDraft(settings.allowed_models.join("\n"));
+      setModelNotice("已保存，新的模型白名单已立即生效。");
+    } catch (e) {
+      setModelError(e instanceof Error ? e.message : "保存失败，请稍后重试");
+    } finally {
+      setSavingModels(false);
+    }
+  }
   async function act(action: () => Promise<void>) {
     setBusy(true);
     setError("");
@@ -65,13 +100,13 @@ export default function AdminPortal() {
         <div>
           <h1 className="text-2xl font-semibold">注册用户</h1>
           <p className="text-sm opacity-60 mt-1">
-            用户状态、余额与异常请求对账
+            模型开放范围、用户状态、余额与异常请求对账
           </p>
         </div>
         <button
           className="btn btn-sm"
-          onClick={() => act(reload)}
-          disabled={busy}
+          onClick={() => act(async () => { await loadModels(); setModelNotice(""); })}
+          disabled={busy || savingModels}
         >
           刷新
         </button>
@@ -81,6 +116,57 @@ export default function AdminPortal() {
           {error}
         </p>
       )}
+      <section className="rounded-xl border border-base-300 bg-base-100 p-5 space-y-4" aria-labelledby="portal-models-title">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 id="portal-models-title" className="text-lg font-medium">用户模型白名单</h2>
+          {modelsLoaded && <span className="badge badge-outline">当前开放 {models.length} 个模型</span>}
+        </div>
+        <p className="text-sm opacity-70">
+          适用于所有用户中心 API Key。填写完整模型 ID，每行一个，也可用逗号分隔。保存后立即生效。
+        </p>
+        {modelsLoaded && models.length > 0 && (
+          <div className="flex flex-wrap gap-2" aria-label="当前开放模型">
+            {models.map((model) => <span key={model} className="badge badge-ghost h-auto py-1 break-all">{model}</span>)}
+          </div>
+        )}
+        <form onSubmit={(event) => { event.preventDefault(); void saveModels(); }} className="space-y-3">
+          <label className="block text-sm font-medium" htmlFor="portal-allowed-models">开放的模型 ID</label>
+          <textarea
+            id="portal-allowed-models"
+            className="textarea textarea-bordered w-full min-h-32 font-mono text-sm"
+            rows={4}
+            maxLength={40_200}
+            value={modelDraft}
+            disabled={!modelsLoaded || savingModels}
+            placeholder={modelsLoaded ? "每行填写一个模型 ID" : "正在读取模型白名单…"}
+            onChange={(event) => { setModelDraft(event.target.value); setModelNotice(""); }}
+            aria-describedby="portal-models-help"
+          />
+          <p id="portal-models-help" className="text-sm opacity-70">
+            请使用已接入且支持文本调用的模型 ID；加入白名单后，还需确保上游账号支持该模型。最多 200 个模型。
+          </p>
+          {modelsLoaded && draftModels.length === 0 && (
+            <p className="text-warning text-sm" role="status">名单为空时，所有用户中心 Key 将无法调用模型。</p>
+          )}
+          {modelError && <p role="alert" className="text-error text-sm">{modelError}</p>}
+          {modelNotice && <p role="status" className="text-success text-sm">{modelNotice}</p>}
+          <div className="flex flex-wrap gap-2">
+            <button className="btn btn-primary btn-sm" disabled={!modelsLoaded || savingModels || !modelsChanged}>
+              {savingModels ? "保存中…" : "保存白名单"}
+            </button>
+            {modelsLoaded ? (
+              <button type="button" className="btn btn-ghost btn-sm" disabled={savingModels || !modelsChanged}
+                onClick={() => { setModelDraft(models.join("\n")); setModelError(""); setModelNotice(""); }}>
+                撤销修改
+              </button>
+            ) : modelError && (
+              <button type="button" className="btn btn-sm" onClick={() => {
+                setModelError(""); void loadModels().catch((e) => setModelError(e.message));
+              }}>重新读取</button>
+            )}
+          </div>
+        </form>
+      </section>
       {detail && (
         <div className="p-4 rounded-xl bg-base-200">
           {detail.email}：可用 {detail.data.available.toLocaleString()} · 预留{" "}

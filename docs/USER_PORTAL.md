@@ -2,6 +2,16 @@
 
 用户中心入口为 `/console`（网页根路径也显示用户中心），注册页为 `/register`，管理员入口为 `/admin`。Web 管理员导航增加“注册用户”，可停用用户、查看余额、处理待对账请求。桌面应用继续使用原管理员界面。
 
+## 管理模型白名单
+
+在管理后台“注册用户”页面顶部的“用户模型白名单”中查看、增加或删除模型 ID，每行一个，也可用逗号分隔。保存后立即用于所有用户中心 Key 的模型列表、用户页面和新发起的调用，无需重启；正在执行的请求仍按原预留规则完成结算。
+
+- 名单须使用完整模型 ID，最多 200 个；加入前应确认对应上游账号支持文本调用和可靠的用量返回。
+- 空名单会关闭所有用户中心 Key 的模型调用权限，不表示全部开放。
+- 首次未保存时沿用 `ABV_PORTAL_ALLOWED_MODELS`；管理员保存后以数据库中的设置为准，重启不会被旧环境变量覆盖。
+- 无界面部署可使用严格管理员鉴权的 `GET /api/portal/settings` 和 `PUT /api/portal/settings`，保存体为 `{"allowed_models":["模型ID"]}`。普通用户 Key 无权修改。
+- 名单和修改审计保存在 `portal.db`；本次增加 schema v2 的 `portal_settings` 表，自动从 v1 迁移并保留现有用户、余额和流水。回退到只支持 v1 的旧程序前须使用对应数据库备份。
+
 ## 额度规则
 
 - 每个账号注册时仅发放一次 5,000,000 token，当天北京时间 24:00 到期。
@@ -38,7 +48,7 @@
 | --- | --- |
 | `ABV_PORTAL_PUBLIC_URL` | 用户中心公开源站地址，例如 `https://console.example.com`，不带路径。HTTP 仅限 loopback 开发测试。 |
 | `ABV_PORTAL_API_BASE_URL` | 用户页面显示的 OpenAI 兼容地址，例如 `https://api.example.com/v1`。 |
-| `ABV_PORTAL_ALLOWED_MODELS` | 逗号分隔的、已经验证可按 token 计量的模型 ID；默认空列表，禁止用户付费调用未配置模型。 |
+| `ABV_PORTAL_ALLOWED_MODELS` | 未在管理后台保存名单时使用的初始值：逗号分隔的、已经验证可按 token 计量的模型 ID；默认空列表。保存后以数据库名单为准。 |
 | `ABV_PORTAL_REGISTRATION_OPEN` | `false` 暂停注册；已有用户可继续登录。 |
 | `ABV_PORTAL_TRUST_PROXY` | 仅在入口保证覆盖客户端 IP 头且容器不直接暴露时设置 `true`；使用 CF-Connecting-IP / X-Real-IP 进行注册限流。 |
 | `ABV_EPAY_URL` | 易支付 V1 兼容网关根地址，必须 HTTPS；不预设商户服务商。 |

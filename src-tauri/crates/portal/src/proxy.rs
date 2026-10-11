@@ -19,15 +19,6 @@ use std::{
     time::Duration,
 };
 
-pub fn allowed_models() -> Vec<String> {
-    std::env::var("ABV_PORTAL_ALLOWED_MODELS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
 pub struct Budget {
     input: usize,
     output: u64,
@@ -134,7 +125,8 @@ async fn handle_inner(request: Request, next: Next) -> Result<Response> {
     let store = p.store.clone();
     let identity = blocking(move || store.key_identity(&key)).await?;
     let path = request.uri().path().to_owned();
-    let models = allowed_models();
+    let store = p.store.clone();
+    let models = blocking(move || store.allowed_models()).await?;
     if request.method() == Method::GET && path == "/v1/models" {
         return Ok(Json(json!({"object":"list","data":models.iter().map(|m|json!({"id":m,"object":"model","owned_by":"portal"})).collect::<Vec<_>>()})).into_response());
     }

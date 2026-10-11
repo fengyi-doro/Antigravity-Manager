@@ -165,12 +165,14 @@ fn cookie_header(config: &Config, token: &str, age: i64) -> Result<HeaderValue> 
     ))
     .map_err(|_| Error::Internal("Invalid session cookie".into()))
 }
-async fn config(State(p): State<Arc<Portal>>) -> Json<Value> {
-    Json(
+async fn config(State(p): State<Arc<Portal>>) -> Result<Json<Value>> {
+    let store = p.store.clone();
+    let models = blocking(move || store.allowed_models()).await?;
+    Ok(Json(
         json!({"registration_open":p.config.registration_open,"payment_enabled":p.config.payment.is_some(),
-        "api_base_url":p.config.api_base_url,"models":crate::proxy::allowed_models(),"signup_tokens":db::SIGNUP_TOKENS,"tokens_per_yuan":1_000_000,
+        "api_base_url":p.config.api_base_url,"models":models,"signup_tokens":db::SIGNUP_TOKENS,"tokens_per_yuan":1_000_000,
         "packages":[{"cents":100,"tokens":1_000_000},{"cents":1000,"tokens":10_000_000},{"cents":5000,"tokens":50_000_000},{"cents":10000,"tokens":100_000_000}]}),
-    )
+    ))
 }
 #[derive(Deserialize)]
 struct Credentials {
@@ -370,9 +372,25 @@ async fn process_notify(p: Arc<Portal>, fields: BTreeMap<String, String>) -> Res
 /// Merge this into the existing administrator router BEFORE its strict auth layer.
 pub fn admin_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
+        .route("/portal/settings", get(admin_settings).put(admin_save_settings))
         .route("/portal/users", get(admin_users))
         .route("/portal/users/:id", get(admin_user).patch(admin_enable))
         .route("/portal/requests/:id/settle", post(admin_settle))
+}
+async fn admin_settings() -> Result<Json<Value>> {
+    let p = instance()?;
+    let models = blocking(move || p.store.allowed_models()).await?;
+    Ok(Json(json!({"allowed_models": models})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelSettingsInput {
+    allowed_models: Vec<String>,
+}
+async fn admin_save_settings(Json(body): Json<ModelSettingsInput>) -> Result<Json<Value>> {
+    let p = instance()?;
+    let models = blocking(move || p.store.set_allowed_models(body.allowed_models)).await?;
+    Ok(Json(json!({"allowed_models": models})))
 }
 async fn admin_users() -> Result<Json<Value>> {
     let p = instance()?;

@@ -71,8 +71,11 @@ impl Store {
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         match version {
             0 => tx.execute_batch(include_str!("schema.sql"))?,
-            1 => (),
+            1 | 2 => (),
             _ => return Err(Error::Internal("Unsupported portal schema version".into())),
+        }
+        if version < 2 {
+            tx.execute_batch(include_str!("model_settings.sql"))?;
         }
         tx.commit()?;
         #[cfg(unix)]
@@ -89,6 +92,47 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         Ok(conn)
+    }
+    /// Saved administrator settings take precedence over the deployment default.
+    pub fn allowed_models(&self) -> Result<Vec<String>> {
+        let saved: Option<String> = self
+            .connect()?
+            .query_row(
+                "SELECT value FROM portal_settings WHERE name='allowed_models'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let models = match saved {
+            Some(value) => serde_json::from_str(&value)
+                .map_err(|e| Error::Internal(format!("Invalid saved model settings: {e}")))?,
+            None => std::env::var("ABV_PORTAL_ALLOWED_MODELS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        };
+        normalize_allowed_models(models)
+    }
+    pub fn set_allowed_models(&self, models: Vec<String>) -> Result<Vec<String>> {
+        let models = normalize_allowed_models(models)?;
+        let value = serde_json::to_string(&models).map_err(|e| Error::Internal(e.to_string()))?;
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO portal_settings(name,value,updated_at) VALUES('allowed_models',?1,?2)
+             ON CONFLICT(name) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            params![value, now()],
+        )?;
+        tx.execute(
+            "INSERT INTO audit(action,subject,details,created_at)
+             VALUES('set_allowed_models','portal',?1,?2)",
+            params![value, now()],
+        )?;
+        tx.commit()?;
+        Ok(models)
     }
     pub fn register(&self, email: &str, password: &str, time: i64) -> Result<User> {
         let email = email.trim().to_lowercase();
@@ -614,6 +658,29 @@ impl Store {
         )?;
         Ok(())
     }
+}
+fn normalize_allowed_models(models: Vec<String>) -> Result<Vec<String>> {
+    if models.len() > 200 {
+        return Err(Error::Invalid("最多开放 200 个模型".into()));
+    }
+    let mut normalized = Vec::new();
+    for model in models {
+        let model = model.trim();
+        if model.is_empty()
+            || model.len() > 200
+            || !model
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.:/".contains(&c))
+        {
+            return Err(Error::Invalid(
+                "模型 ID 须为 1–200 个字符，仅支持英文字母、数字及 - _ . : /，不支持通配符".into(),
+            ));
+        }
+        if !normalized.iter().any(|saved| saved == model) {
+            normalized.push(model.to_owned());
+        }
+    }
+    Ok(normalized)
 }
 fn read_order(r: &rusqlite::Row<'_>) -> rusqlite::Result<Order> {
     Ok(Order {
