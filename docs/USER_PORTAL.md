@@ -1,100 +1,43 @@
-# 用户中心、额度与在线充值
+# 用户中心与原版用户 Token
 
-用户中心入口为 `/console`（网页根路径也显示用户中心），注册页为 `/register`，管理员入口为 `/admin`。Web 管理员导航增加“注册用户”，可停用用户、查看余额、处理待对账请求。桌面应用继续使用原管理员界面。
+用户中心入口为 `/console`，注册页为 `/register`，管理员入口为 `/admin`。用户中心负责网站注册、登录和账户与密钥的关联；模型请求直接使用原版用户 Token 功能。
 
-## 管理模型白名单
+## 模型调用和统计
 
-在管理后台“注册用户”页面顶部的“用户模型白名单”中查看、增加或删除模型 ID，每行一个，也可用逗号分隔。保存后立即用于所有用户中心 Key 的模型列表、用户页面和新发起的调用，无需重启；正在执行的请求仍按原预留规则完成结算。
+- 注册账户通过原版 `user_token_db::create_token` 创建 `sk-*` Token，保存到原版 `user_tokens.db`，可在管理员“用户 Token”页面查看和管理。默认长期有效、不限制 IP、不设置访问时段。
+- 账户 API 使用原版鉴权、`UserTokenIdentity`、协议适配、模型映射、上游账号选择、思考和上下文处理、端点回退与重试。
+- 用量由原版监控中间件调用 `record_token_usage_and_ip` 记录。用户中心直接读取 `user_tokens.total_requests`、`total_tokens_used` 和 `token_usage_logs`，不重新估算、解析或计算 token。
+- 账户 API 没有额外的模型白名单、输出/思考预算、流式参数改写、请求预留、扣费或重试限制。模型与协议能力和原版用户 Token 一致。
+- 密钥重置通过原版创建与停用接口实现。重置保留管理员配置的到期时间、IP、访问时段及启用状态。原密钥的记录仍保留在原版管理功能中；账户页展示当前密钥的累计统计。停用网站账户同步停用其当前原版 Token。
+- 登录后可查看并复制当前原版密钥。管理员在原版界面停用或删除 Token 后，访问账户页不会自动重新创建或启用它。
 
-- 名单须使用完整模型 ID，最多 200 个；加入前应确认对应上游账号支持文本调用和可靠的用量返回。
-- 空名单会关闭所有用户中心 Key 的模型调用权限，不表示全部开放。
-- 首次未保存时沿用 `ABV_PORTAL_ALLOWED_MODELS`；管理员保存后以数据库中的设置为准，重启不会被旧环境变量覆盖。
-- 无界面部署可使用严格管理员鉴权的 `GET /api/portal/settings` 和 `PUT /api/portal/settings`，保存体为 `{"allowed_models":["模型ID"]}`。普通用户 Key 无权修改。
-- 名单和修改审计保存在 `portal.db`；本次增加 schema v2 的 `portal_settings` 表，自动从 v1 迁移并保留现有用户、余额和流水。回退到只支持 v1 的旧程序前须使用对应数据库备份。
+## 历史数据与迁移
 
-## 额度规则
+`portal.db` schema v3 新增 `native_token_links`，仅保存网站用户 ID 与原版 Token ID 的关联。升级时为已有账户创建关联的原版 Token；已有非网站用户 Token 保持原样。
 
-- 每个账号注册时仅发放一次 5,000,000 token，当天北京时间 24:00 到期。
-- 充值比例固定为人民币 1 元 = 1,000,000 token，金额以整数分存储；套餐为 1、10、50、100 元。
-- 优先使用未过期的注册赠送额度，充值额度长期有效。
-- API Key 属于用户，重置 Key 不会重置额度；完整密钥只在创建时返回，数据库保存随机密钥的 SHA-256 摘要。
-- 密码使用 Argon2id 加盐摘要；登录使用 HttpOnly、SameSite=Strict 会话 Cookie，HTTPS 下设置 Secure。修改操作同时验证 Origin 和会话 CSRF token。
-- 本版邮箱用于登录标识，尚不发送验证邮件或密码找回邮件。注册接口按来源地址限流；正式开放前应结合实际用户规模设置入口防滥用策略。
+旧的 `sk-portal-*` 密钥失效。用户登录后点击“查看并复制”，将新的 `sk-*` 密钥更新到客户端。密钥鉴权直接进入原版链路，不再识别旧的独立计费密钥。
 
-## 本地业务数据库
+独立充值、注册赠送、额度预留、扣费及人工结算已停用。历史余额、赠送、订单、请求和流水记录保留，用户页提供历史记录查看；这些记录不参与当前用量或访问权限判断。旧充值、支付通知及结算接口返回 HTTP 410。旧模型白名单配置保留在数据库中，但不再影响模型调用。
 
-新增 `portal.db`，位于现有应用数据目录，使用独立版本号迁移、SQLite WAL、外键与事务。账号、密钥、赠送/充值额度、预留分配、请求结算、额度流水、订单、支付事件、审计记录同库保存。
+升级前同时备份 `portal.db` 与 `user_tokens.db`。回滚需要恢复匹配的镜像和两个数据库，不能让仅支持 v2 的旧程序直接打开 v3 数据库。
 
-赠送到账、请求预留、请求结算、订单到账分别使用写事务，唯一约束阻止重复赠送及重复付款入账。额度到期在余额查询、预留和结算时处理，保留到期流水。重启时将未完成请求标为待对账，不自动退还可能已经被上游消耗的额度。
+## 网站身份与配置
 
-现有 `user_tokens.db` 属于旧管理员令牌功能，不自动按旧的 username 标签创建网站账户。原管理员密码和主 API Key 不作为网站用户凭据。此版本关闭旧全局鉴权开关也不会开放匿名 AI 调用；用户中心初始化失败时同样拒绝匿名调用。
+网站密码仍使用 Argon2id；会话使用 HttpOnly、SameSite=Strict Cookie，HTTPS 下设置 Secure。修改密钥及退出登录需要验证 Origin 和 CSRF token。网站账户凭据不能用于管理员接口。
 
-## 支持的计费请求与边界
+- `ABV_PORTAL_PUBLIC_URL`：用户中心源站地址，生产使用 HTTPS。
+- `ABV_PORTAL_API_BASE_URL`：账户页显示的 API 地址。
+- `ABV_PORTAL_REGISTRATION_OPEN=false`：暂停注册。
+- `ABV_PORTAL_TRUST_PROXY=true`：入口可靠覆盖客户端 IP 时，用于注册和登录限流。
+- `WEB_PASSWORD` / `API_KEY`：原版管理员密码与主 API Key。
 
-- 支持白名单模型的 OpenAI Chat Completions、Responses（HTTP）、Claude Messages、Gemini generateContent/streamGenerateContent 文本请求。
-- 输入、输出按 token 1:1 扣减，缓存属于输入，思考属于输出，避免在总数外再次叠加。
-- 请求最多 1 MiB，默认输出预算 4096，客户端可显式设置 1–65536。文本输入按序列化 UTF-8 字节上界加 65536 预留，用于容纳网关添加的上下文；正常结算释放未用部分。
-- 统一上游客户端在参数归一化后再次限制输出和思考预算，并检查最终输入大小。一个用户请求只允许一次上游生成调用；自动重试、辅助摘要生成不允许额外消费这笔预算。
-- 本版用户 Key 不开放图片、音视频、WebSocket、服务端历史引用或搜索工具。请携带完整文本历史。管理员与旧令牌的协议功能不受该计费白名单限制。
-- 正常完整响应按实际 usage 结算。响应中断、缺少完整 usage、未知上游失败均保留预留，等待管理员对账；已知未发送或明确被上游拒绝的请求释放预留。
-- 如上游用量超出已预留额度，超出部分继续扣除可用余额，不足部分记为欠额并阻止继续消费；后续充值先补足欠额。不会丢弃超出的用量记录。
-- 不支持凭日志开关控制扣费。用户中心的计费流程独立于原调用日志功能。
+`ABV_PORTAL_ALLOWED_MODELS` 和 `ABV_EPAY_*` 不再参与运行逻辑。API 的鉴权模式、模型、请求大小和上游配置均使用原版设置。
 
-## 环境变量
-
-复制 `docker/.env.portal.example` 到未纳入版本控制的部署配置中。
-
-| 变量 | 用途 |
-| --- | --- |
-| `ABV_PORTAL_PUBLIC_URL` | 用户中心公开源站地址，例如 `https://console.example.com`，不带路径。HTTP 仅限 loopback 开发测试。 |
-| `ABV_PORTAL_API_BASE_URL` | 用户页面显示的 OpenAI 兼容地址，例如 `https://api.example.com/v1`。 |
-| `ABV_PORTAL_ALLOWED_MODELS` | 未在管理后台保存名单时使用的初始值：逗号分隔的、已经验证可按 token 计量的模型 ID；默认空列表。保存后以数据库名单为准。 |
-| `ABV_PORTAL_REGISTRATION_OPEN` | `false` 暂停注册；已有用户可继续登录。 |
-| `ABV_PORTAL_TRUST_PROXY` | 仅在入口保证覆盖客户端 IP 头且容器不直接暴露时设置 `true`；使用 CF-Connecting-IP / X-Real-IP 进行注册限流。 |
-| `ABV_EPAY_URL` | 易支付 V1 兼容网关根地址，必须 HTTPS；不预设商户服务商。 |
-| `ABV_EPAY_PID` | 已开通微信、支付宝收款的商户号。 |
-| `ABV_EPAY_KEY` | 商户签名密钥，仅后端读取。 |
-| `WEB_PASSWORD` / `API_KEY` | 保留现有管理员密码和主 API Key 配置，不能使用网站用户 Key 替代。 |
-
-支付参数未完整配置时，页面显示“充值暂未开放”，服务端拒绝创建支付订单。不会使用虚假支付成功状态或自动赠送替代实际充值。
-
-## 支付接入
-
-实现的是易支付 V1 **协议适配器**，不包含收款商户开户；网关运营方和商户资质由部署者配置。支持 `wxpay`（微信）与 `alipay`（支付宝）。协议依据：[页面支付、通知、签名与订单查询文档](https://pay.xr876.cn/doc/v1_legacy_api.html)。
-
-1. 用户选择套餐，服务端保存不可变订单金额、购买额度、用户和支付方式。
-2. 服务端生成签名后的 `submit.php` POST 表单，浏览器跳转收银台。
-3. 支付平台通知 `${ABV_PORTAL_PUBLIC_URL}/portal/api/payments/notify`。只有签名、商户号、订单、渠道、金额及 TRADE_SUCCESS 全部正确时才入账。
-4. 支付返回 `/console?order=...` 后查询服务器；前端跳转不是到账依据。
-5. 回调延迟时，用户可点击“核对到账”。服务器经 HTTPS 使用商户凭据主动查询原网关，核对后补单。跨用户订单查询会被拒绝。
-6. 商户交易号和订单号有唯一约束；并发或重复通知只入账一次。查询不跟随 HTTP 重定向，避免商户密钥被带到其他来源。
-
-正式收款需用实际商户完成小额支付、回调、查询与对账验证。当前未接入自动退款；退款涉及已消耗额度，应由管理员核对支付平台及账本后处理，不能直接删除订单。
-
-## 开发与测试
-
-业务库可独立于 Tauri 测试：
+## 验证
 
 ```bash
-cargo test --manifest-path src-tauri/crates/portal/Cargo.toml
-npx tsc --noEmit
+cargo test --manifest-path src-tauri/crates/portal/Cargo.toml -- --test-threads=1
 npm run build
 ```
 
-本机 UI/API 预览（独立数据、仅监听 127.0.0.1:18046，不提供 AI 代理或管理员 API）：
-
-```bash
-PORTAL_PREVIEW_DATA=/tmp/antigravity-portal-preview \
-PORTAL_PREVIEW_DIST="$PWD/dist" \
-ABV_PORTAL_PUBLIC_URL=http://127.0.0.1:18046 \
-ABV_PORTAL_ALLOWED_MODELS=gemini-3-flash \
-cargo run --manifest-path src-tauri/crates/portal/Cargo.toml --example preview
-```
-
-测试覆盖：赠送唯一性、北京时间边界、Key 撤销、账号停用、并发预留、到期后释放、重启待对账、超额欠额、支付通知验签、重复到账、订单归属、Cookie/CSRF、最终上游预算及协议用量归一。
-
-## Docker 部署与恢复
-
-`docker/docker-compose.portal.yml` 提供独立开发部署，默认绑定本机 8046，与原有 8045 服务隔离。先在副本数据中验证，数据库迁移与服务行为确认后再切换入口。业务库升级后不能直接用旧版本覆盖新库；回滚时恢复对应版本的镜像与数据快照。
-
-现有 Cloudflare 入口需要允许用户页及 `/portal/api/*`；支付回调必须可从支付平台访问。API 域名继续仅转发已允许的 AI 路径。管理员入口使用 `/admin`，管理 API 仍在 `/api/*` 并受原强制鉴权保护。Docker 启动脚本会在应用健康检查通过后恢复已启用的 Cloudflared 隧道；不向进程参数或日志写入管理员密码和隧道 token。切换后仍需检查公网入口与隧道状态。
+集成测试直接包含原版 `user_token_db.rs` 与生产适配器，验证原版密钥创建、鉴权、重置、停用、统计一致、账户隔离、CSRF、旧数据保留及计费接口停用。

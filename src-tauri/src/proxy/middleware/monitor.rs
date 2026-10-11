@@ -956,7 +956,7 @@ pub async fn monitor_middleware(
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let start_instant = start;
 
-        tokio::spawn(antigravity_portal::proxy::scope_current(async move {
+        tokio::spawn(async move {
             let stream_start = std::time::Instant::now();
             let mut all_stream_data = Vec::new();
             let mut last_few_bytes = Vec::new();
@@ -1553,7 +1553,7 @@ pub async fn monitor_middleware(
             record_user_token_usage(&user_token_identity, &log, user_agent.clone());
 
             monitor.log_request(log).await;
-        }));
+        });
 
         Response::from_parts(
             parts,

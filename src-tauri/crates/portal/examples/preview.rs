@@ -13,10 +13,11 @@ async fn main() {
     );
     let dist = std::env::var("PORTAL_PREVIEW_DIST")
         .expect("Set PORTAL_PREVIEW_DIST to the built frontend");
-    let portal = Arc::new(Portal {
-        store: Store::open(data.join("portal.db")).expect("database"),
-        config: Config::from_env().expect("config"),
-    });
+    let portal = Arc::new(Portal::new(
+        Store::open(data.join("portal.db")).expect("database"),
+        Config::from_env().expect("config"),
+        None,
+    ));
     let app =
         router_with(portal).fallback_service(tower_http::services::ServeDir::new(&dist).fallback(
             tower_http::services::ServeFile::new(format!("{dist}/index.html")),

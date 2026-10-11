@@ -1,8 +1,7 @@
-//! User identities and transactional token accounting, independent of request logging.
+//! User identities linked to the application's original user-token implementation.
 pub mod db;
 pub mod http;
-pub mod payment;
-pub mod proxy;
+pub mod native;
 
 use axum::{
     http::StatusCode,
@@ -12,7 +11,7 @@ use axum::{
 use serde_json::json;
 use std::{
     path::Path,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -23,7 +22,6 @@ pub enum Error {
     Unauthorized,
     Forbidden,
     Conflict,
-    Quota,
     Unavailable(String),
     Internal(String),
 }
@@ -48,11 +46,6 @@ impl IntoResponse for Error {
                 "conflict",
                 "账号已存在或操作发生冲突".into(),
             ),
-            Self::Quota => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "insufficient_quota",
-                "可用额度不足，请充值后重试".into(),
-            ),
             Self::Unavailable(s) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", s),
             Self::Internal(s) => {
                 tracing::error!(error = %s, "Portal operation failed");
@@ -74,16 +67,34 @@ impl IntoResponse for Error {
 pub struct Portal {
     pub store: db::Store,
     pub config: http::Config,
+    pub tokens: Option<Arc<dyn native::TokenBackend>>,
+    token_lock: Mutex<()>,
+}
+impl Portal {
+    pub fn new(
+        store: db::Store,
+        config: http::Config,
+        tokens: Option<Arc<dyn native::TokenBackend>>,
+    ) -> Self {
+        Self {
+            store,
+            config,
+            tokens,
+            token_lock: Mutex::new(()),
+        }
+    }
 }
 static PORTAL: OnceLock<Arc<Portal>> = OnceLock::new();
 
-pub fn initialize(data_dir: &Path) -> Result<()> {
+pub fn initialize(data_dir: &Path, tokens: Arc<dyn native::TokenBackend>) -> Result<()> {
     let config = http::Config::from_env()?;
     let store = db::Store::open(data_dir.join("portal.db"))?;
-    // Never refund abandoned in-flight requests automatically: upstream usage may exist.
-    store.recover_pending()?;
+    let portal = Portal::new(store, config, Some(tokens));
+    for user in portal.store.users()? {
+        portal.ensure_native_token(&user)?;
+    }
     PORTAL
-        .set(Arc::new(Portal { store, config }))
+        .set(Arc::new(portal))
         .map_err(|_| Error::Internal("Portal already initialized".into()))
 }
 

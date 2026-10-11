@@ -461,7 +461,6 @@ impl UpstreamClient {
 
             // 遍历所有端点，失败时自动切换
             for (idx, base_url) in V1_INTERNAL_BASE_URL_FALLBACKS.iter().enumerate() {
-                antigravity_portal::proxy::constrain_upstream(method, &mut body)?;
                 let url = Self::build_url(base_url, method, query_string);
                 let has_next = idx + 1 < V1_INTERNAL_BASE_URL_FALLBACKS.len();
 
@@ -486,7 +485,6 @@ impl UpstreamClient {
                 match response {
                     Ok(resp) => {
                         let status = resp.status();
-                        antigravity_portal::proxy::note_upstream_response(status.as_u16());
                         if status.is_success() {
                             if idx > 0 {
                                 tracing::info!(
@@ -664,7 +662,6 @@ impl UpstreamClient {
         let mut last_error = String::new();
 
         for base_url in V1_INTERNAL_BASE_URL_FALLBACKS.iter() {
-            antigravity_portal::proxy::constrain_upstream(method, &mut body)?;
             let url = Self::build_url(base_url, method, None);
 
             let response = match client
