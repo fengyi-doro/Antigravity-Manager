@@ -266,9 +266,15 @@
   background: #fff0ef;
   color: #a43d35;
 }
-.portal-auth {
-  max-width: 360px;
+.portal-auth-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 360px) minmax(64px, 1fr);
+  column-gap: clamp(12px, 4vw, 56px);
   margin: 64px auto;
+}
+.portal-auth {
+  grid-column: 2;
+  min-width: 0;
 }
 .portal-auth > p {
   margin-bottom: 28px;
@@ -292,6 +298,74 @@
 }
 .portal-auth > .portal-text-button {
   margin-top: 22px;
+}
+.portal-welcome {
+  grid-column: 3;
+  align-self: end;
+  justify-self: center;
+  position: sticky;
+  bottom: clamp(16px, 6vh, 56px);
+  bottom: clamp(16px, 6dvh, 56px);
+  width: min(212px, 100%);
+}
+.portal-welcome-character {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 180ms ease;
+}
+.portal-welcome-character:hover {
+  transform: translateY(-4px) rotate(-2deg);
+}
+.portal-welcome-character:active {
+  transform: translateY(1px) scale(0.96);
+}
+.portal-welcome-character img {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+}
+.portal-welcome-bubble {
+  position: absolute;
+  z-index: 1;
+  bottom: calc(100% + 16px);
+  right: 0;
+  padding: 11px 17px;
+  border: 1px solid #d9e7df;
+  border-radius: 18px;
+  background: white;
+  color: #205d4c;
+  box-shadow: 0 6px 20px #193c2c0d;
+  white-space: nowrap;
+  font-size: clamp(12px, 1.4vw, 14px);
+  max-width: calc(100vw - 36px);
+  pointer-events: none;
+  animation: portal-welcome-pop 220ms ease-out;
+}
+.portal-welcome-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -6px;
+  right: min(40%, 70px);
+  width: 10px;
+  height: 10px;
+  border-right: 1px solid #d9e7df;
+  border-bottom: 1px solid #d9e7df;
+  background: white;
+  transform: rotate(45deg);
+}
+@keyframes portal-welcome-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.94); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .portal-welcome-character { transition: none; }
+  .portal-welcome-bubble { animation: none; }
 }
 .portal-loading {
   text-align: center;
@@ -416,8 +490,17 @@
   .portal-actions {
     flex-wrap: wrap;
   }
-  .portal-auth {
+  .portal-auth-layout {
+    grid-template-columns: minmax(0, 360px) minmax(64px, 1fr);
+    column-gap: clamp(12px, 3vw, 20px);
     margin: 42px auto;
+  }
+  .portal-auth {
+    grid-column: 1;
+  }
+  .portal-welcome {
+    grid-column: 2;
+    width: min(112px, 100%);
   }
   .portal-dialog {
     padding: 22px;

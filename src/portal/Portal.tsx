@@ -22,6 +22,25 @@ async function api<T>(path: string, method = "GET", body?: unknown, csrf?: strin
   return result as T;
 }
 
+function WelcomeCharacter() {
+  const [greeting, setGreeting] = useState(0);
+  useEffect(() => {
+    if (!greeting) return;
+    const timer = window.setTimeout(() => setGreeting(0), 3200);
+    return () => window.clearTimeout(timer);
+  }, [greeting]);
+
+  return (
+    <div className="portal-welcome">
+      {greeting > 0 && <div key={greeting} id="portal-welcome-message" className="portal-welcome-bubble" role="status">欢迎进入幻想乡</div>}
+      <button type="button" className="portal-welcome-character" aria-label="点击人物，欢迎进入幻想乡"
+        aria-describedby={greeting > 0 ? "portal-welcome-message" : undefined} onClick={() => setGreeting((value) => value + 1)}>
+        <img src="/images/portal/koishi-welcome-v2.png" alt="" width={212} height={212} draggable={false} />
+      </button>
+    </div>
+  );
+}
+
 export default function Portal() {
   const [config, setConfig] = useState<Config | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -80,16 +99,19 @@ export default function Portal() {
       {error && <div className="portal-alert portal-error" role="alert">{error}</div>}
       {notice && <div className="portal-alert" role="status">{notice}</div>}
       {!ready ? <p className="portal-loading">正在加载…</p> : !snapshot ? (
-        <main className="portal-auth">
-          <div className="portal-eyebrow">开始使用 API</div><h1>{register ? "创建账号" : "欢迎回来"}</h1>
-          <p className="portal-muted">登录后管理 API Key，查看请求记录与 token 用量。</p>
-          <form onSubmit={authenticate}>
-            <label>邮箱<input type="email" autoComplete="username" required maxLength={254} value={email} onChange={(e) => setEmail(e.target.value)} /></label>
-            <label>密码<input type="password" autoComplete={register ? "new-password" : "current-password"} required minLength={register ? 10 : undefined} maxLength={128} value={password} onChange={(e) => setPassword(e.target.value)} /></label>
-            {register && <label>确认密码<input type="password" autoComplete="new-password" required minLength={10} maxLength={128} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></label>}
-            <button className="portal-primary" disabled={busy || (register && config?.registration_open === false)}>{busy ? "请稍候…" : register ? "注册" : "登录"}</button>
-          </form>
-          <button className="portal-text-button" onClick={() => { setRegister(!register); setError(""); window.history.replaceState({}, "", register ? "/console" : "/register"); }}>{register ? "已有账号？登录" : "还没有账号？注册"}</button>
+        <main className="portal-auth-layout">
+          <div className="portal-auth">
+            <div className="portal-eyebrow">开始使用 API</div><h1>{register ? "创建账号" : "欢迎回来"}</h1>
+            <p className="portal-muted">登录后管理 API Key，查看请求记录与 token 用量。</p>
+            <form onSubmit={authenticate}>
+              <label>邮箱<input type="email" autoComplete="username" required maxLength={254} value={email} onChange={(e) => setEmail(e.target.value)} /></label>
+              <label>密码<input type="password" autoComplete={register ? "new-password" : "current-password"} required minLength={register ? 10 : undefined} maxLength={128} value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+              {register && <label>确认密码<input type="password" autoComplete="new-password" required minLength={10} maxLength={128} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></label>}
+              <button className="portal-primary" disabled={busy || (register && config?.registration_open === false)}>{busy ? "请稍候…" : register ? "注册" : "登录"}</button>
+            </form>
+            <button className="portal-text-button" onClick={() => { setRegister(!register); setError(""); window.history.replaceState({}, "", register ? "/console" : "/register"); }}>{register ? "已有账号？登录" : "还没有账号？注册"}</button>
+          </div>
+          <WelcomeCharacter />
         </main>
       ) : (
         <main>
