@@ -260,7 +260,9 @@ export async function request<T>(cmd: string, args?: any): Promise<T> {
   try {
     const response = await fetch(url, options);
     if (!response.ok) {
-      if (!isTauri && response.status === 401) {
+      // A delayed response from before login must not invalidate the new session.
+      if (!isTauri && response.status === 401 &&
+          apiKey === sessionStorage.getItem('abv_admin_api_key')) {
         // [FIX #1163] 增加防抖锁，避免重复事件导致 UI 抖动
         const now = Date.now();
         const lastAuthError = (window as any)._lastAuthErrorTime || 0;

@@ -1,0 +1,14 @@
+name: antigravity-portal-dev
+services:
+  portal:
+    image: antigravity-manager-portal:dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "127.0.0.1:${PORTAL_TEST_PORT:-8046}:8045"
+    env_file:
+      - ${PORTAL_ENV_FILE:-.env.portal}
+    volumes:
+      - ${PORTAL_DATA_DIR:-../.portal-data}:/root/.antigravity_tools
+    restart: unless-stopped

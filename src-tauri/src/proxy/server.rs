@@ -718,6 +718,7 @@ impl AxumServer {
 
         // 2. 构建管理 API (强制鉴权)
         let admin_routes = Router::new()
+            .merge(antigravity_portal::http::admin_router())
             .route("/health", get(health_check_handler))
             .route(
                 "/accounts",
@@ -1050,7 +1051,8 @@ impl AxumServer {
             ))
             .layer(cors_layer())
             .layer(DefaultBodyLimit::max(max_body_size)) // 放宽 body 大小限制
-            .with_state(state.clone());
+            .with_state(state.clone())
+            .merge(antigravity_portal::http::router());
 
         // 静态文件托管 (用于 Headless/Docker 模式)
         let dist_path = std::env::var("ABV_DIST_PATH").unwrap_or_else(|_| "dist".to_string());

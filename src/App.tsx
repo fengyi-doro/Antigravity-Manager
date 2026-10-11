@@ -1,3 +1,4 @@
+import './i18n';
 import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 
 import Layout from './components/layout/Layout';
@@ -10,7 +11,7 @@ import TokenStats from './pages/TokenStats';
 import Security from './pages/Security';
 import ThemeManager from './components/common/ThemeManager';
 import UserToken from './pages/UserToken';
-import { ApiKeyFun } from './pages/ApiKeyFun';
+import AdminPortal from './portal/AdminPortal';
 import { UpdateNotification } from './components/UpdateNotification';
 import SuggestionDeleteThinkingModal from './components/common/SuggestionDeleteThinkingModal';
 import DebugConsole from './components/debug/DebugConsole';
@@ -48,13 +49,10 @@ const router = createBrowserRouter([
         path: 'token-stats',
         element: <TokenStats />,
       },
+      { path: 'portal-users', element: <AdminPortal /> },
       {
         path: 'user-token',
         element: <UserToken />,
-      },
-      {
-        path: 'apikey-fun',
-        element: <ApiKeyFun />,
       },
       {
         path: 'security',
@@ -66,7 +64,7 @@ const router = createBrowserRouter([
       },
     ],
   },
-]);
+], { basename: isTauri() ? '/' : '/admin' });
 
 function App() {
   const { config, loadConfig } = useConfigStore();

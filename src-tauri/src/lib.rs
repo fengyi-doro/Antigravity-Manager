@@ -311,6 +311,17 @@ pub fn run() {
         error!("Failed to initialize user token database: {}", e);
     }
 
+    match modules::account::get_data_dir() {
+        Ok(data_dir) => {
+            if let Err(e) = antigravity_portal::initialize(
+                &data_dir, std::sync::Arc::new(modules::portal_tokens::NativeUserTokens),
+            ) {
+                error!("Failed to initialize user portal: {:?}", e);
+            }
+        }
+        Err(e) => error!("Failed to locate user portal database: {}", e),
+    }
+
     if is_headless {
         info!("Starting in HEADLESS mode...");
 
