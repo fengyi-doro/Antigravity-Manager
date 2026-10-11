@@ -795,6 +795,30 @@ pub fn resolve_model_route_with_effort(
     result
 }
 
+/// Re-resolve only automatically selected bare-model tiers for the chosen account.
+/// Explicit IDs and user/official redirects retain their existing route. The
+/// caller passes the original client model, before adapters resolve variants.
+pub fn resolve_account_model_route(
+    original_model: &str,
+    mapped_model: &str,
+    custom_mapping: &std::collections::HashMap<String, String>,
+    client_effort: Option<&str>,
+    available_models: &std::collections::HashSet<String>,
+) -> String {
+    if resolve_custom_model_route(original_model, custom_mapping).is_some()
+        || crate::proxy::common::variant_mapping::is_physical_upstream_id(original_model)
+    {
+        return mapped_model.to_string();
+    }
+
+    crate::proxy::model_specs::DynamicTierRouter::resolve_with_available_models(
+        original_model,
+        client_effort,
+        available_models,
+    )
+    .unwrap_or_else(|| mapped_model.to_string())
+}
+
 /// Normalize any physical model name to one of the 3 standard protection IDs.
 /// This ensures quota protection works consistently regardless of API versioning or request variations.
 ///
@@ -870,6 +894,167 @@ pub fn normalize_to_standard_id(model_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn available(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn account_tier_uses_only_the_selected_directory() {
+        let custom = HashMap::new();
+        let named_tiers = available(&[
+            "gemini-3.7-flash-low",
+            "gemini-3.7-flash-medium",
+            "gemini-3.7-flash-high",
+            "gemini-3.8-flash-tiered",
+        ]);
+        // The embedded/global catalog contains 3.7 tiered, but this account does not.
+        assert_eq!(
+            resolve_account_model_route(
+                "gemini-3.7-flash",
+                "gemini-3.7-flash-tiered",
+                &custom,
+                None,
+                &named_tiers,
+            ),
+            "gemini-3.7-flash-medium"
+        );
+        assert_eq!(
+            resolve_account_model_route(
+                "gemini-3.7-flash",
+                "gemini-3.7-flash-tiered",
+                &custom,
+                Some("low"),
+                &named_tiers,
+            ),
+            "gemini-3.7-flash-low"
+        );
+        assert_eq!(
+            resolve_account_model_route(
+                "gemini-3.8-flash",
+                "gemini-3.8-flash-high",
+                &custom,
+                None,
+                &named_tiers,
+            ),
+            "gemini-3.8-flash-tiered"
+        );
+    }
+
+    #[test]
+    fn account_tier_preserves_a_real_native_bare_id() {
+        let models = available(&["gemini-3.5-flash", "gemini-3.5-flash-low"]);
+        for effort in [None, Some("medium"), Some("high")] {
+            assert_eq!(
+                resolve_account_model_route(
+                    "gemini-3.5-flash",
+                    "gemini-3.5-flash",
+                    &HashMap::new(),
+                    effort,
+                    &models,
+                ),
+                "gemini-3.5-flash"
+            );
+        }
+        assert_eq!(
+            resolve_account_model_route(
+                "gemini-3.5-flash",
+                "gemini-3.5-flash",
+                &HashMap::new(),
+                Some("low"),
+                &models,
+            ),
+            "gemini-3.5-flash-low"
+        );
+        assert_eq!(
+            resolve_account_model_route(
+                "gemini-3.7-flash",
+                "gemini-3.7-flash-tiered",
+                &HashMap::new(),
+                None,
+                &available(&["gemini-3.7-flash"]),
+            ),
+            "gemini-3.7-flash"
+        );
+    }
+
+    #[test]
+    fn account_tier_preserves_explicit_ids_and_custom_routes() {
+        let models = available(&["gemini-3.7-flash-medium", "gemini-3.1-pro-low"]);
+        for explicit in [
+            "gemini-3.7-flash-high",
+            "gemini-3.7-flash-tiered",
+            "gemini-pro-agent",
+        ] {
+            assert_eq!(
+                resolve_account_model_route(explicit, explicit, &HashMap::new(), None, &models),
+                explicit
+            );
+        }
+        for pattern in ["gemini-3.7-flash", "gemini-*-flash"] {
+            let custom = HashMap::from([(pattern.to_string(), "chosen-model".to_string())]);
+            assert_eq!(
+                resolve_account_model_route(
+                    "gemini-3.7-flash",
+                    "chosen-model",
+                    &custom,
+                    None,
+                    &models,
+                ),
+                "chosen-model"
+            );
+        }
+    }
+
+    #[test]
+    fn account_tier_preserves_official_forwarding_rules() {
+        let original = "gemini-99.42-flash";
+        update_dynamic_forwarding_rules(original.to_string(), "replacement-model".to_string());
+        let routed = resolve_account_model_route(
+            original,
+            "replacement-model",
+            &HashMap::new(),
+            None,
+            &available(&["gemini-99.42-flash-medium"]),
+        );
+        DYNAMIC_MODEL_FORWARDING_RULES.remove(original);
+        assert_eq!(routed, "replacement-model");
+    }
+
+    #[test]
+    fn account_tier_handles_future_versions_without_cross_version_fallback() {
+        let models = available(&["gemini-9.12-flash-high", "gemini-9.12-flash-low"]);
+        assert_eq!(
+            resolve_account_model_route(
+                "gemini-9.12-flash",
+                "gemini-9.12-flash-tiered",
+                &HashMap::new(),
+                None,
+                &models,
+            ),
+            "gemini-9.12-flash-high"
+        );
+        assert_eq!(
+            resolve_account_model_route(
+                "gemini-3.7-flash",
+                "gemini-3.7-flash-tiered",
+                &HashMap::new(),
+                None,
+                &models,
+            ),
+            "gemini-3.7-flash-tiered"
+        );
+        assert_eq!(
+            resolve_account_model_route(
+                "gemini-3.7-flash",
+                "gemini-3.7-flash-tiered",
+                &HashMap::new(),
+                None,
+                &available(&[]),
+            ),
+            "gemini-3.7-flash-tiered"
+        );
+    }
 
     #[test]
     fn test_model_mapping() {

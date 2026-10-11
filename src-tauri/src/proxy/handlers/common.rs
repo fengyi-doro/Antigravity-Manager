@@ -734,53 +734,91 @@ pub fn build_dual_track_error(
     // 1. 深度解析并反转义上游错误
     let (raw_upstream_msg, parsed_upstream) = parse_raw_upstream_error(error_text);
 
-    let (readable_prefix, diagnosis, suggestion, err_type, err_code) = if is_internal_limited {
-        (
-            "【网关调度受限】".to_string(),
-            format!(
-                "网关本地账号池当前暂无可用账号或全部可用账号处于限流冷却中。调度详情: {}",
-                error_text
-            ),
-            "请等待冷却结束（参考等待秒数），或在网关中添加更多正常账号。".to_string(),
-            "rate_limit_error",
-            "all_accounts_limited",
-        )
-    } else if is_network_error {
-        (
-            "【网络请求异常（非服务端故障）】".to_string(),
-            format!(
-                "请求上游接口时网络连接失败（非网关服务端故障，请排查网络或代理）：{}",
-                error_text
-            ),
-            "请检查系统代理、上游节点连通性或本地网络设置，确保能正常连接上游服务。".to_string(),
-            "network_error",
-            "upstream_network_error",
-        )
-    } else if is_not_found {
-        (
+    let (readable_prefix, mut diagnosis, mut suggestion, err_type, err_code) =
+        if is_internal_limited {
+            (
+                "【网关调度受限】".to_string(),
+                format!(
+                    "网关本地账号池当前暂无可用账号或全部可用账号处于限流冷却中。调度详情: {}",
+                    error_text
+                ),
+                "请等待冷却结束（参考等待秒数），或在网关中添加更多正常账号。".to_string(),
+                "rate_limit_error",
+                "all_accounts_limited",
+            )
+        } else if is_network_error {
+            (
+                "【网络请求异常（非服务端故障）】".to_string(),
+                format!(
+                    "请求上游接口时网络连接失败（非网关服务端故障，请排查网络或代理）：{}",
+                    error_text
+                ),
+                "请检查系统代理、上游节点连通性或本地网络设置，确保能正常连接上游服务。"
+                    .to_string(),
+                "network_error",
+                "upstream_network_error",
+            )
+        } else if is_not_found {
+            (
             format!("【模型不存在】[{}]", model),
             format!("模型 [{}] 在上游端点不存在，或当前绑定的账号暂未开通该模型的访问权限。", model),
             "请核对模型名称，或在网关配置中的「自定义模型映射」将其重定向至可用模型（如 gemini-2.5-flash）。".to_string(),
             "invalid_request_error",
             "model_not_found",
         )
-    } else if status_code == 429 || status_code == 529 {
-        (
-            format!("【上游限流 HTTP {}】", status_code),
-            format!("模型 [{}] 触发上游配额耗尽或频率限制。", model),
-            "请稍候自动恢复，或添加更多账号以分散并发请求。".to_string(),
-            "rate_limit_error",
-            "rate_limit_exceeded",
-        )
-    } else {
-        (
-            format!("【上游错误 HTTP {}】", status_code),
-            format!("调用上游模型 [{}] 发生错误 (HTTP {})。", model, status_code),
-            "请参考 upstream_error 中的详细字段排查原因。".to_string(),
-            "api_error",
-            "upstream_error",
-        )
-    };
+        } else if status_code == 429 || status_code == 529 {
+            (
+                format!("【上游限流 HTTP {}】", status_code),
+                format!("模型 [{}] 触发上游配额耗尽或频率限制。", model),
+                "请稍候自动恢复，或添加更多账号以分散并发请求。".to_string(),
+                "rate_limit_error",
+                "rate_limit_exceeded",
+            )
+        } else {
+            (
+                format!("【上游错误 HTTP {}】", status_code),
+                format!("调用上游模型 [{}] 发生错误 (HTTP {})。", model, status_code),
+                "请参考 upstream_error 中的详细字段排查原因。".to_string(),
+                "api_error",
+                "upstream_error",
+            )
+        };
+
+    if let Some(attempts) = parsed_upstream
+        .get("upstream_attempts")
+        .and_then(Value::as_array)
+    {
+        let chain: Vec<String> = attempts
+            .iter()
+            .map(|attempt| {
+                let endpoint = attempt
+                    .get("endpoint")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let host = url::Url::parse(endpoint)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string());
+                let status = attempt
+                    .get("status")
+                    .and_then(Value::as_u64)
+                    .map(|status| status.to_string())
+                    .unwrap_or_else(|| "network".to_string());
+                format!("{} HTTP {}", host, status)
+            })
+            .collect();
+        if !chain.is_empty() {
+            diagnosis.push_str(&format!(" 端点尝试: {}。", chain.join(" → ")));
+        }
+        if (status_code == 429 || status_code == 529)
+            && attempts
+                .iter()
+                .take(attempts.len().saturating_sub(1))
+                .any(|attempt| attempt.get("status").and_then(Value::as_u64) == Some(404))
+        {
+            suggestion.push_str(" 前序端点返回了 404，请同时核对该账号的真实可用模型和模型映射。");
+        }
+    }
 
     let readable_message = format!(
         "{} 网关诊断: {} 建议: {}",
@@ -879,6 +917,35 @@ pub fn build_dual_track_error(
 #[cfg(test)]
 mod retry_after_tests {
     use super::*;
+
+    #[test]
+    fn fallback_diagnosis_keeps_404_before_final_429() {
+        let raw = json!({
+            "error": {"code": 429, "message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"},
+            "upstream_attempts": [
+                {"endpoint": "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent", "status": 404},
+                {"endpoint": "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent", "status": 429}
+            ]
+        });
+        for protocol in ["openai", "responses", "claude", "gemini"] {
+            let result =
+                build_dual_track_error(protocol, 429, "gemini-3.7-flash-tiered", &raw.to_string());
+            assert_eq!(result["error"]["message"], "Resource exhausted");
+            assert_eq!(result["error"]["upstream_error"]["status"], 429);
+            assert_eq!(
+                result["error"]["upstream_error"]["response"]["upstream_attempts"],
+                raw["upstream_attempts"]
+            );
+            assert!(result["error"]["gateway_error"]["diagnosis"]
+                .as_str()
+                .unwrap()
+                .contains("HTTP 404"));
+            assert!(result["error"]["gateway_error"]["suggestion"]
+                .as_str()
+                .unwrap()
+                .contains("模型映射"));
+        }
+    }
 
     #[test]
     fn test_extract_retry_after_seconds() {

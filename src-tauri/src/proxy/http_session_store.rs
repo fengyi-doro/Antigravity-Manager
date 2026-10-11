@@ -25,6 +25,7 @@ pub struct HttpSessionEntry {
 
 #[derive(Debug)]
 struct SessionNode {
+    tenant_key: String,
     parent: Option<Arc<SessionNode>>,
     input_delta: Vec<Value>,
     response_output: Vec<Value>,
@@ -48,7 +49,7 @@ struct StoredSession {
 }
 
 struct HttpSessionStore {
-    sessions: HashMap<String, StoredSession>,
+    sessions: HashMap<(String, String), StoredSession>,
 }
 
 impl HttpSessionStore {
@@ -58,8 +59,14 @@ impl HttpSessionStore {
         }
     }
 
-    fn get(&mut self, response_id: &str) -> Option<(HttpSessionEntry, SessionParent)> {
-        let stored = self.sessions.get_mut(response_id)?;
+    fn get(
+        &mut self,
+        tenant_key: &str,
+        response_id: &str,
+    ) -> Option<(HttpSessionEntry, SessionParent)> {
+        let stored = self
+            .sessions
+            .get_mut(&(tenant_key.to_string(), response_id.to_string()))?;
         stored.last_accessed = Instant::now();
         let node = stored.node.clone();
         Some((
@@ -73,8 +80,9 @@ impl HttpSessionStore {
         ))
     }
 
-    fn insert(&mut self, response_id: String, entry: HttpSessionEntry) {
+    fn insert(&mut self, tenant_key: &str, response_id: String, entry: HttpSessionEntry) {
         self.insert_delta(
+            tenant_key,
             response_id,
             None,
             entry.input_items,
@@ -87,6 +95,7 @@ impl HttpSessionStore {
 
     fn insert_delta(
         &mut self,
+        tenant_key: &str,
         response_id: String,
         parent: Option<SessionParent>,
         input_delta: Vec<Value>,
@@ -94,12 +103,20 @@ impl HttpSessionStore {
         instructions: String,
         model: String,
         routing_session_id: Option<String>,
-    ) {
+    ) -> bool {
+        if parent
+            .as_ref()
+            .is_some_and(|parent| parent.0.tenant_key != tenant_key)
+        {
+            tracing::warn!("[Session] Rejected a parent belonging to another tenant");
+            return false;
+        }
         let routing_session_id = routing_session_id.unwrap_or_else(|| response_id.clone());
         self.sessions.insert(
-            response_id,
+            (tenant_key.to_string(), response_id),
             StoredSession {
                 node: Arc::new(SessionNode {
+                    tenant_key: tenant_key.to_string(),
                     parent: parent.map(|parent| parent.0),
                     input_delta,
                     response_output,
@@ -112,6 +129,7 @@ impl HttpSessionStore {
         );
         // 顺便淘汰过期 session（惰性清理）
         self.evict_expired();
+        true
     }
 
     fn evict_expired(&mut self) {
@@ -148,27 +166,29 @@ fn store() -> &'static Mutex<HttpSessionStore> {
 }
 
 /// 根据 previous_response_id 查找历史会话
-pub async fn get_session(previous_response_id: &str) -> Option<HttpSessionEntry> {
+pub async fn get_session(tenant_key: &str, previous_response_id: &str) -> Option<HttpSessionEntry> {
     store()
         .lock()
         .await
-        .get(previous_response_id)
+        .get(tenant_key, previous_response_id)
         .map(|(entry, _)| entry)
 }
 
 pub async fn get_session_with_parent(
+    tenant_key: &str,
     previous_response_id: &str,
 ) -> Option<(HttpSessionEntry, SessionParent)> {
-    store().lock().await.get(previous_response_id)
+    store().lock().await.get(tenant_key, previous_response_id)
 }
 
-/// 保存新的会话状态（以 response_id 为 key）
-pub async fn save_session(response_id: String, entry: HttpSessionEntry) {
-    store().lock().await.insert(response_id, entry);
+/// 保存新的会话状态（以 tenant 和 response_id 为 key）
+pub async fn save_session(tenant_key: &str, response_id: String, entry: HttpSessionEntry) {
+    store().lock().await.insert(tenant_key, response_id, entry);
 }
 
 /// 保存 Responses 本轮增量；父节点的 Arc 强引用保证分支共享祖先。
 pub async fn save_session_delta(
+    tenant_key: &str,
     response_id: String,
     parent: Option<SessionParent>,
     input_delta: Vec<Value>,
@@ -178,6 +198,7 @@ pub async fn save_session_delta(
     routing_session_id: String,
 ) {
     store().lock().await.insert_delta(
+        tenant_key,
         response_id,
         parent,
         input_delta,
@@ -196,15 +217,17 @@ pub struct PreparedSessionInput {
 
 /// 合并请求历史，并在客户端回放完整历史时仅提取新增项。
 pub fn prepare_session_input(
+    tenant_key: &str,
     history: Vec<Value>,
     new_input: Vec<Value>,
     tool_call_cache: &HashMap<String, Value>,
 ) -> PreparedSessionInput {
-    prepare_session_input_with_storage(history, new_input, tool_call_cache, true)
+    prepare_session_input_with_storage(tenant_key, history, new_input, tool_call_cache, true)
 }
 
 /// Restore the complete model input while optionally retaining a delta for storage.
 pub fn prepare_session_input_with_storage(
+    tenant_key: &str,
     history: Vec<Value>,
     new_input: Vec<Value>,
     tool_call_cache: &HashMap<String, Value>,
@@ -297,7 +320,8 @@ pub fn prepare_session_input_with_storage(
         (new_input.clone(), false)
     };
 
-    let delta = merge_history_with_new_input(Vec::new(), &[], delta_source, tool_call_cache);
+    let delta =
+        merge_history_with_new_input(tenant_key, Vec::new(), &[], delta_source, tool_call_cache);
     let stored_delta = if retain_delta {
         delta.clone()
     } else {
@@ -306,9 +330,9 @@ pub fn prepare_session_input_with_storage(
     let merged = if reset_parent || history.is_empty() {
         delta
     } else if use_new_input_as_merged {
-        merge_history_with_new_input(Vec::new(), &[], new_input, tool_call_cache)
+        merge_history_with_new_input(tenant_key, Vec::new(), &[], new_input, tool_call_cache)
     } else {
-        merge_history_with_new_input(history, &[], delta, tool_call_cache)
+        merge_history_with_new_input(tenant_key, history, &[], delta, tool_call_cache)
     };
 
     PreparedSessionInput {
@@ -322,6 +346,7 @@ pub fn prepare_session_input_with_storage(
 /// 同时把新的 user input items 追加进去
 /// 返回合并后的 input items
 pub fn merge_history_with_new_input(
+    tenant_key: &str,
     mut history: Vec<Value>,
     response_output: &[Value],
     new_input: Vec<Value>,
@@ -347,7 +372,7 @@ pub fn merge_history_with_new_input(
             }
             filtered.push(item);
         }
-        repair_tool_calls(&mut filtered, tool_call_cache);
+        repair_tool_calls(tenant_key, &mut filtered, tool_call_cache);
         return dedupe_input_items(filtered);
     }
 
@@ -366,13 +391,17 @@ pub fn merge_history_with_new_input(
     }
 
     // 修复工具调用（确保function_call_output前有对应的function_call）
-    repair_tool_calls(&mut history, tool_call_cache);
+    repair_tool_calls(tenant_key, &mut history, tool_call_cache);
 
     // 去重
     dedupe_input_items(history)
 }
 
-fn repair_tool_calls(items: &mut Vec<Value>, tool_call_cache: &HashMap<String, Value>) {
+fn repair_tool_calls(
+    tenant_key: &str,
+    items: &mut Vec<Value>,
+    tool_call_cache: &HashMap<String, Value>,
+) {
     let mut call_present = std::collections::HashSet::new();
     for item in items.iter() {
         let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -396,7 +425,7 @@ fn repair_tool_calls(items: &mut Vec<Value>, tool_call_cache: &HashMap<String, V
                     if let Some(cached_call) = tool_call_cache
                         .get(call_id)
                         .cloned()
-                        .or_else(|| get_cached_tool_call(call_id))
+                        .or_else(|| get_cached_tool_call(tenant_key, call_id))
                     {
                         new_items.push(cached_call.clone());
                         inserted.insert(call_id.to_string());
@@ -491,13 +520,23 @@ mod tests {
         let mut full_input = history.clone();
         full_input.push(next.clone());
         for replay in [vec![next], full_input.clone()] {
-            let prepared =
-                prepare_session_input_with_storage(history.clone(), replay, &HashMap::new(), false);
+            let prepared = prepare_session_input_with_storage(
+                "tenant-test",
+                history.clone(),
+                replay,
+                &HashMap::new(),
+                false,
+            );
             assert!(prepared.delta.is_empty());
             assert_eq!(prepared.merged, full_input);
         }
-        let prepared =
-            prepare_session_input_with_storage(Vec::new(), history.clone(), &HashMap::new(), false);
+        let prepared = prepare_session_input_with_storage(
+            "tenant-test",
+            Vec::new(),
+            history.clone(),
+            &HashMap::new(),
+            false,
+        );
         assert!(prepared.delta.is_empty());
         assert_eq!(prepared.merged, history);
     }
@@ -510,9 +549,14 @@ mod tests {
             json!({"type":"function_call_output", "call_id":call_id, "output":"/synthetic/workspace"}),
             json!({"role":"user", "content":"continue"}),
         ];
-        assert!(get_cached_tool_call(&call_id).is_none());
-        let prepared =
-            prepare_session_input_with_storage(Vec::new(), input.clone(), &HashMap::new(), false);
+        assert!(get_cached_tool_call("tenant-test", &call_id).is_none());
+        let prepared = prepare_session_input_with_storage(
+            "tenant-test",
+            Vec::new(),
+            input.clone(),
+            &HashMap::new(),
+            false,
+        );
         assert!(prepared.delta.is_empty());
         assert_eq!(prepared.merged, input);
     }
@@ -520,14 +564,16 @@ mod tests {
     #[test]
     fn session_chain_stores_delta_and_materializes_history() {
         let mut store = HttpSessionStore::new();
-        store.insert("resp-1".to_string(), entry("first"));
-        let (root, parent) = store.get("resp-1").expect("root");
+        store.insert("tenant-test", "resp-1".to_string(), entry("first"));
+        let (root, parent) = store.get("tenant-test", "resp-1").expect("root");
         let mut replay = root.input_items.clone();
         replay.push(json!({"id": "msg-second", "content": "second"}));
-        let prepared = prepare_session_input(root.input_items, replay, &HashMap::new());
+        let prepared =
+            prepare_session_input("tenant-test", root.input_items, replay, &HashMap::new());
         assert_eq!(prepared.delta.len(), 1);
         assert_eq!(prepared.merged.len(), 2);
         store.insert_delta(
+            "tenant-test",
             "resp-2".to_string(),
             Some(parent),
             prepared.delta,
@@ -537,22 +583,102 @@ mod tests {
             Some("routing-root".to_string()),
         );
 
-        let (previous, _) = store.get("resp-2").expect("child");
+        let (previous, _) = store.get("tenant-test", "resp-2").expect("child");
         assert_eq!(previous.input_items[0]["content"], "first");
         assert_eq!(previous.input_items.len(), 3);
-        assert_eq!(store.sessions["resp-2"].node.input_delta.len(), 1);
-        assert_eq!(store.sessions["resp-2"].node.response_output.len(), 1);
+        assert_eq!(
+            store.sessions[&("tenant-test".to_string(), "resp-2".to_string())]
+                .node
+                .input_delta
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.sessions[&("tenant-test".to_string(), "resp-2".to_string())]
+                .node
+                .response_output
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn response_ids_are_isolated_between_tenants() {
+        let mut store = HttpSessionStore::new();
+        store.insert("tenant-a", "resp-shared".to_string(), entry("private-a"));
+        assert!(store.get("tenant-b", "resp-shared").is_none());
+        store.insert("tenant-b", "resp-shared".to_string(), entry("private-b"));
+
+        for (tenant, expected) in [("tenant-a", "private-a"), ("tenant-b", "private-b")] {
+            let (session, _) = store.get(tenant, "resp-shared").expect("owned response");
+            assert_eq!(session.input_items[0]["content"], expected);
+        }
+    }
+
+    #[test]
+    fn session_chain_rejects_a_parent_owned_by_another_tenant() {
+        let mut store = HttpSessionStore::new();
+        store.insert("tenant-a", "resp-root".to_string(), entry("private-a"));
+        let (_, parent) = store.get("tenant-a", "resp-root").expect("owned parent");
+
+        assert!(!store.insert_delta(
+            "tenant-b",
+            "resp-child".to_string(),
+            Some(parent.clone()),
+            vec![json!({"content": "new input"})],
+            Vec::new(),
+            String::new(),
+            String::new(),
+            None,
+        ));
+        assert!(store.get("tenant-b", "resp-child").is_none());
+
+        assert!(store.insert_delta(
+            "tenant-a",
+            "resp-child".to_string(),
+            Some(parent),
+            vec![json!({"content": "new input"})],
+            Vec::new(),
+            String::new(),
+            String::new(),
+            None,
+        ));
+        let (session, _) = store.get("tenant-a", "resp-child").expect("owned child");
+        assert_eq!(session.input_items[0]["content"], "private-a");
+        assert_eq!(session.input_items[1]["content"], "new input");
+    }
+
+    #[test]
+    fn tool_call_repair_only_uses_the_current_tenant_cache() {
+        let call_id = format!("call-scoped-{}", uuid::Uuid::new_v4());
+        let call = json!({
+            "type": "function_call", "call_id": call_id,
+            "name": "private_tool", "arguments": "{\"private\":true}"
+        });
+        crate::proxy::handlers::openai::insert_cached_tool_call(
+            "tenant-a",
+            call_id.clone(),
+            call.clone(),
+        );
+        let output = json!({"type": "function_call_output", "call_id": call_id, "output": "done"});
+        let prepare = |tenant| {
+            prepare_session_input(tenant, Vec::new(), vec![output.clone()], &HashMap::new())
+        };
+
+        assert_eq!(prepare("tenant-b").merged, vec![output.clone()]);
+        assert_eq!(prepare("tenant-a").merged, vec![call, output]);
     }
 
     #[test]
     fn old_response_id_branches_share_parent() {
         let mut store = HttpSessionStore::new();
-        store.insert("resp-root".to_string(), entry("root"));
-        let (_, parent_a) = store.get("resp-root").expect("parent a");
-        let (_, parent_b) = store.get("resp-root").expect("parent b");
+        store.insert("tenant-test", "resp-root".to_string(), entry("root"));
+        let (_, parent_a) = store.get("tenant-test", "resp-root").expect("parent a");
+        let (_, parent_b) = store.get("tenant-test", "resp-root").expect("parent b");
         assert!(Arc::ptr_eq(&parent_a.0, &parent_b.0));
 
         store.insert_delta(
+            "tenant-test",
             "resp-a".to_string(),
             Some(parent_a),
             vec![json!({"content": "branch a"})],
@@ -562,6 +688,7 @@ mod tests {
             Some("routing-root".to_string()),
         );
         store.insert_delta(
+            "tenant-test",
             "resp-b".to_string(),
             Some(parent_b),
             vec![json!({"content": "branch b"})],
@@ -571,15 +698,27 @@ mod tests {
             Some("routing-root".to_string()),
         );
 
-        let parent_a = store.sessions["resp-a"].node.parent.as_ref().unwrap();
-        let parent_b = store.sessions["resp-b"].node.parent.as_ref().unwrap();
+        let parent_a = store.sessions[&("tenant-test".to_string(), "resp-a".to_string())]
+            .node
+            .parent
+            .as_ref()
+            .unwrap();
+        let parent_b = store.sessions[&("tenant-test".to_string(), "resp-b".to_string())]
+            .node
+            .parent
+            .as_ref()
+            .unwrap();
         assert!(Arc::ptr_eq(parent_a, parent_b));
         assert_eq!(
-            store.sessions["resp-a"].node.routing_session_id,
+            store.sessions[&("tenant-test".to_string(), "resp-a".to_string())]
+                .node
+                .routing_session_id,
             "routing-root"
         );
         assert_eq!(
-            store.sessions["resp-b"].node.routing_session_id,
+            store.sessions[&("tenant-test".to_string(), "resp-b".to_string())]
+                .node
+                .routing_session_id,
             "routing-root"
         );
     }
@@ -598,7 +737,7 @@ mod tests {
             json!({"role": "user", "type": "message", "content": "next question"}),
         ];
 
-        let prepared = prepare_session_input(history, new_input, &HashMap::new());
+        let prepared = prepare_session_input("tenant-test", history, new_input, &HashMap::new());
         // Delta should be the 1 new message, not all 3 messages!
         assert_eq!(prepared.delta.len(), 1);
         assert_eq!(prepared.delta[0]["content"], "next question");
@@ -618,7 +757,7 @@ mod tests {
             json!({"role": "assistant", "type": "message", "content": "different 2"}),
         ];
 
-        let prepared = prepare_session_input(history, new_input, &HashMap::new());
+        let prepared = prepare_session_input("tenant-test", history, new_input, &HashMap::new());
         // Should not duplicate to 4 items
         assert_eq!(prepared.merged.len(), 2);
     }

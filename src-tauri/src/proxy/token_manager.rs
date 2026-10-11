@@ -1482,6 +1482,42 @@ impl TokenManager {
         Some(out)
     }
 
+    /// Use the selected account's directory for automatic bare-model tier choices.
+    /// A missing/empty directory keeps the existing route for cold-start parity.
+    pub fn resolve_bare_model_for_account(
+        &self,
+        account_id: &str,
+        original_model: &str,
+        mapped_model: &str,
+        custom_mapping: &HashMap<String, String>,
+        client_effort: Option<&str>,
+    ) -> String {
+        let available_models = self
+            .tokens
+            .get(account_id)
+            .and_then(|token| Self::get_available_models_from_json(&token.account_path));
+        let Some(available_models) = available_models.filter(|models| !models.is_empty()) else {
+            return mapped_model.to_string();
+        };
+        let resolved = crate::proxy::common::model_mapping::resolve_account_model_route(
+            original_model,
+            mapped_model,
+            custom_mapping,
+            client_effort,
+            &available_models,
+        );
+        if resolved != mapped_model {
+            tracing::info!(
+                "[Account-Tier-Route] account={} {} -> {} (requested={})",
+                account_id,
+                mapped_model,
+                resolved,
+                original_model
+            );
+        }
+        resolved
+    }
+
     pub async fn resolve_dynamic_model_for_account(
         &self,
         account_id: &str,
@@ -4694,6 +4730,85 @@ mod tests {
             TokenManager::build_dynamic_model_candidates("gemini-3.1-pro-high").unwrap();
         assert_eq!(candidates_high[0], "gemini-3.1-pro-high");
         assert!(candidates_high.contains(&"gemini-pro-agent".to_string()));
+    }
+
+    #[tokio::test]
+    async fn account_tier_reads_each_accounts_current_directory() {
+        let root = std::env::temp_dir().join(format!("account-tier-{}", uuid::Uuid::new_v4()));
+        let accounts = root.join("accounts");
+        std::fs::create_dir_all(&accounts).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        for (id, tiers) in [
+            (
+                "named",
+                vec![
+                    "gemini-3.7-flash-low",
+                    "gemini-3.7-flash-medium",
+                    "gemini-3.7-flash-high",
+                ],
+            ),
+            (
+                "adaptive",
+                vec!["gemini-3.7-flash-tiered", "gemini-3.7-flash-medium"],
+            ),
+            ("cold", vec![]),
+        ] {
+            let models: Vec<_> = tiers
+                .iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "name": name, "percentage": 100, "reset_time": ""
+                    })
+                })
+                .collect();
+            let account = serde_json::json!({
+                "id": id, "email": format!("{}@example.invalid", id),
+                "created_at": now, "last_used": now,
+                "token": {"access_token": "test", "refresh_token": "test", "token_type": "Bearer",
+                    "expires_in": 3600, "expiry_timestamp": now + 3600, "project_id": "test"},
+                "quota": {"last_updated": now, "models": models},
+                "disabled": false, "proxy_disabled": false
+            });
+            std::fs::write(accounts.join(format!("{}.json", id)), account.to_string()).unwrap();
+        }
+        let manager = TokenManager::new(root.clone());
+        assert_eq!(manager.load_accounts().await.unwrap(), 3);
+        for (id, expected) in [
+            ("named", "gemini-3.7-flash-medium"),
+            ("adaptive", "gemini-3.7-flash-tiered"),
+            ("cold", "gemini-3.7-flash-tiered"),
+            ("missing", "gemini-3.7-flash-tiered"),
+        ] {
+            assert_eq!(
+                manager.resolve_bare_model_for_account(
+                    id,
+                    "gemini-3.7-flash",
+                    "gemini-3.7-flash-tiered",
+                    &HashMap::new(),
+                    None,
+                ),
+                expected
+            );
+        }
+        // A refresh removes tiered: no restart or global-catalog mutation is needed.
+        let path = accounts.join("adaptive.json");
+        let mut updated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        updated["quota"]["models"] = serde_json::json!([
+            {"name": "gemini-3.7-flash-medium", "percentage": 100, "reset_time": ""}
+        ]);
+        std::fs::write(&path, updated.to_string()).unwrap();
+        assert_eq!(
+            manager.resolve_bare_model_for_account(
+                "adaptive",
+                "gemini-3.7-flash",
+                "gemini-3.7-flash-tiered",
+                &HashMap::new(),
+                None,
+            ),
+            "gemini-3.7-flash-medium"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

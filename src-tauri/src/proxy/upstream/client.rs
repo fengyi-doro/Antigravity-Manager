@@ -27,6 +27,38 @@ pub struct UpstreamCallResult {
     pub fallback_attempts: Vec<FallbackAttemptLog>,
 }
 
+/// Preserve endpoint failures when the final endpoint returns a different error.
+/// The provider's error object and HTTP status remain authoritative.
+pub fn annotate_upstream_error(
+    error_text: String,
+    attempts: &[FallbackAttemptLog],
+    final_endpoint: &str,
+    final_status: u16,
+) -> String {
+    if attempts.is_empty() {
+        return error_text;
+    }
+    let mut error = match serde_json::from_str::<Value>(&error_text) {
+        Ok(value) if value.is_object() => value,
+        _ => serde_json::json!({"error": {"message": error_text}}),
+    };
+    let mut endpoints: Vec<Value> = attempts
+        .iter()
+        .map(|attempt| {
+            serde_json::json!({
+                "endpoint": attempt.endpoint_url.split('?').next().unwrap_or_default(),
+                "status": attempt.status,
+            })
+        })
+        .collect();
+    endpoints.push(serde_json::json!({
+        "endpoint": final_endpoint.split('?').next().unwrap_or_default(),
+        "status": final_status,
+    }));
+    error["upstream_attempts"] = Value::Array(endpoints);
+    error.to_string()
+}
+
 /// 邮箱脱敏：只显示前3位 + *** + @域名前2位 + ***
 /// 例: "userexample@gmail.com" → "use***@gm***"
 pub fn mask_email(email: &str) -> String {
@@ -746,6 +778,38 @@ fn derive_session_uuid(seed: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_error_preserves_provider_error_and_endpoint_history() {
+        let original = serde_json::json!({"error": {
+            "code": 429, "message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"
+        }});
+        let attempts = vec![FallbackAttemptLog {
+            endpoint_url:
+                "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+                    .into(),
+            status: Some(404),
+            error: "not found".into(),
+        }];
+        let result: Value = serde_json::from_str(&annotate_upstream_error(
+            original.to_string(),
+            &attempts,
+            "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+            429,
+        ))
+        .unwrap();
+        assert_eq!(result["error"], original["error"]);
+        assert_eq!(result["upstream_attempts"][0]["status"], 404);
+        assert_eq!(result["upstream_attempts"][1]["status"], 429);
+        assert!(!result["upstream_attempts"][0]["endpoint"]
+            .as_str()
+            .unwrap()
+            .contains('?'));
+        assert_eq!(
+            annotate_upstream_error("plain error".into(), &[], "unused", 400),
+            "plain error"
+        );
+    }
 
     #[test]
     fn test_build_url() {

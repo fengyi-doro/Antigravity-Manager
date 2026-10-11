@@ -631,6 +631,7 @@ pub fn create_codex_sse_stream<S, E>(
     mut gemini_stream: Pin<Box<S>>,
     model: String,
     session_id: String,
+    tenant_key: String,
     message_count: usize,
     _assistant_turn_index: usize,
     response_id: String,
@@ -961,7 +962,7 @@ where
 
                                                                 let tc_val = item_obj.clone();
                                                                 if cache_tool_calls {
-                                                                    crate::proxy::handlers::openai::insert_cached_tool_call(call_id.clone(), tc_val.clone());
+                                                                    crate::proxy::handlers::openai::insert_cached_tool_call(&tenant_key, call_id.clone(), tc_val.clone());
                                                                 }
                                                                 final_outputs_map.insert(tool_output_index, tc_val);
                                                             }
@@ -1327,6 +1328,7 @@ mod tests {
             Box::pin(stream::iter(items)),
             "gemini-pro-agent".to_string(),
             "test-codex-session".to_string(),
+            "tenant-test".to_string(),
             0,
             0,
             "resp-test-codex-session".to_string(),
@@ -1361,6 +1363,7 @@ mod tests {
             Box::pin(stream::iter(items)),
             "gemini-pro-agent".to_string(),
             "test-codex-session".to_string(),
+            "tenant-test".to_string(),
             0,
             0,
             "resp-test-codex-session".to_string(),
@@ -1426,11 +1429,40 @@ mod tests {
                 .expect("JSON arguments"),
             json!({"command":"pwd"})
         );
-        assert!(crate::proxy::handlers::openai::get_cached_tool_call(call_id).is_none());
+        assert!(
+            crate::proxy::handlers::openai::get_cached_tool_call("tenant-test", call_id).is_none()
+        );
         assert!(events
             .iter()
             .any(|event| event["type"] == "response.output_item.done"
                 && event["item"]["call_id"] == call_id));
+    }
+
+    #[tokio::test]
+    async fn responses_stream_caches_tool_calls_only_for_its_tenant() {
+        let (_, events) = collect_codex_stream(vec![json!({
+            "response": {"candidates": [{
+                "finishReason": "STOP",
+                "content": {"parts": [{"functionCall": {"name":"private_tool", "args":{"private":true}}}]}
+            }]}
+        })]).await;
+        let call = events
+            .iter()
+            .find(|event| {
+                event["type"] == "response.output_item.done"
+                    && event["item"]["type"] == "function_call"
+            })
+            .expect("completed tool call")["item"]
+            .clone();
+        let call_id = call["call_id"].as_str().expect("call id").to_string();
+        assert_eq!(
+            crate::proxy::handlers::openai::get_cached_tool_call("tenant-test", &call_id),
+            Some(call)
+        );
+        assert!(
+            crate::proxy::handlers::openai::get_cached_tool_call("another-tenant", &call_id)
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1445,6 +1477,7 @@ mod tests {
         let save_task = tokio::spawn(async move {
             let (outputs, ack_tx) = completion_rx.await.expect("completed output");
             crate::proxy::http_session_store::save_session_delta(
+                "tenant-test",
                 save_response_id,
                 None,
                 vec![json!({"id": "user-1", "role": "user", "content": "hello"})],
@@ -1460,6 +1493,7 @@ mod tests {
             Box::pin(stream::iter(upstream)),
             "gemini-pro-agent".to_string(),
             "test-session".to_string(),
+            "tenant-test".to_string(),
             1,
             0,
             response_id.clone(),
@@ -1474,9 +1508,10 @@ mod tests {
             let text = String::from_utf8_lossy(&item);
             if text.contains("event: response.completed") {
                 saw_completed = true;
-                let restored = crate::proxy::http_session_store::get_session(&response_id)
-                    .await
-                    .expect("session exists when response.completed is visible");
+                let restored =
+                    crate::proxy::http_session_store::get_session("tenant-test", &response_id)
+                        .await
+                        .expect("session exists when response.completed is visible");
                 assert_eq!(restored.input_items[0]["id"], "user-1");
                 let completed: Value = serde_json::from_str(
                     text.lines()

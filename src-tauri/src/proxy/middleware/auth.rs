@@ -2,7 +2,7 @@
 use axum::{
     extract::Request,
     extract::State,
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -10,6 +10,31 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::proxy::{ProxyAuthMode, ProxySecurityConfig};
+
+/// Use the same credential sources in every authentication mode and session scope.
+pub(crate) fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .map(|value| match value.split_once(char::is_whitespace) {
+            Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") => token.trim(),
+            None if value.eq_ignore_ascii_case("bearer") => "",
+            _ => value,
+        })
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            ["x-api-key", "x-goog-api-key"]
+                .into_iter()
+                .find_map(|name| {
+                    headers
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+        })
+}
 
 /// API Key 认证中间件 (代理接口使用，遵循 auth_mode)
 pub async fn auth_middleware(
@@ -62,17 +87,7 @@ async fn auth_middleware_internal(
         if matches!(effective_mode, ProxyAuthMode::Off) {
             // [FIX] 即使 auth_mode=Off，也需要尝试识别 User Token 以记录使用情况
             // 先检查是否携带了 User Token
-            let api_key = request
-                .headers()
-                .get(header::AUTHORIZATION)
-                .and_then(|h| h.to_str().ok())
-                .and_then(|s| s.strip_prefix("Bearer ").or(Some(s)))
-                .or_else(|| {
-                    request
-                        .headers()
-                        .get("x-api-key")
-                        .and_then(|h| h.to_str().ok())
-                });
+            let api_key = extract_api_key(request.headers());
 
             if let Some(token) = api_key {
                 // 尝试验证是否为 User Token（不阻止请求，只记录）
@@ -112,23 +127,7 @@ async fn auth_middleware_internal(
     }
 
     // 从 header 中提取 API key
-    let api_key = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer ").or(Some(s)))
-        .or_else(|| {
-            request
-                .headers()
-                .get("x-api-key")
-                .and_then(|h| h.to_str().ok())
-        })
-        .or_else(|| {
-            request
-                .headers()
-                .get("x-goog-api-key")
-                .and_then(|h| h.to_str().ok())
-        });
+    let api_key = extract_api_key(request.headers());
 
     if security.api_key.is_empty()
         && (security.admin_password.is_none()
@@ -239,6 +238,41 @@ pub struct UserTokenIdentity {
 mod tests {
     use super::*;
     use crate::proxy::ProxyAuthMode;
+
+    #[test]
+    fn credential_headers_resolve_to_the_same_key() {
+        for (name, value) in [
+            ("authorization", "Bearer sk-test-key"),
+            ("authorization", "bearer sk-test-key"),
+            ("authorization", "sk-test-key"),
+            ("x-api-key", "sk-test-key"),
+            ("x-goog-api-key", "sk-test-key"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, value.parse().unwrap());
+            assert_eq!(extract_api_key(&headers), Some("sk-test-key"));
+        }
+    }
+
+    #[test]
+    fn empty_headers_do_not_hide_another_credential() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer ".parse().unwrap());
+        headers.insert("x-api-key", " ".parse().unwrap());
+        headers.insert("x-goog-api-key", "  sk-test-key  ".parse().unwrap());
+        assert_eq!(extract_api_key(&headers), Some("sk-test-key"));
+    }
+
+    #[test]
+    fn authorization_precedes_provider_key_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer sk-primary".parse().unwrap());
+        headers.insert("x-api-key", "sk-claude".parse().unwrap());
+        headers.insert("x-goog-api-key", "sk-gemini".parse().unwrap());
+        assert_eq!(extract_api_key(&headers), Some("sk-primary"));
+        headers.remove("authorization");
+        assert_eq!(extract_api_key(&headers), Some("sk-claude"));
+    }
 
     #[tokio::test]
     async fn test_admin_auth_with_password() {

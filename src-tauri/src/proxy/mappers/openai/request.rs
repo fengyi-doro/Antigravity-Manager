@@ -1758,8 +1758,10 @@ mod tests {
         assert!(!joined.contains("Request type:"));
     }
 
-    #[test]
-    fn responses_reads_the_parent_signature_instead_of_the_routing_identity() {
+    #[tokio::test]
+    async fn responses_parent_history_reads_signature_from_the_tenant_store_key() {
+        let tenant_key = format!("tenant-{}", uuid::Uuid::new_v4());
+        let store_key = format!("{tenant_key}:sess-parent");
         let previous_response_id = format!("resp-parent-{}", uuid::Uuid::new_v4());
         let routing_session_id = format!("resp-root-{}", uuid::Uuid::new_v4());
         use base64::Engine;
@@ -1767,20 +1769,36 @@ mod tests {
         raw.extend_from_slice(&[b'A'; 60]);
         let signature = base64::engine::general_purpose::STANDARD.encode(raw);
         crate::proxy::SignatureCache::global().cache_session_signature(
-            &previous_response_id,
+            &store_key,
             signature.clone(),
             1,
         );
+        crate::proxy::http_session_store::save_session_delta(
+            &tenant_key,
+            previous_response_id.clone(),
+            None,
+            vec![json!({"type":"function_call", "call_id":"call-parent", "name":"test_tool", "arguments":"{}"})],
+            Vec::new(),
+            String::new(),
+            "gemini-3.7-flash-high".to_string(),
+            routing_session_id.clone(),
+        ).await;
+        let parent =
+            crate::proxy::http_session_store::get_session(&tenant_key, &previous_response_id)
+                .await
+                .expect("same tenant parent history");
+        let tool_call = &parent.input_items[0];
         let request = OpenAIRequest {
-            model: "gemini-3.7-flash-high".to_string(),
+            model: parent.model,
+            session_id: Some(store_key),
             messages: vec![OpenAIMessage {
                 role: "assistant".to_string(),
                 tool_calls: Some(vec![ToolCall {
-                    id: "call-parent".to_string(),
+                    id: tool_call["call_id"].as_str().unwrap().to_string(),
                     r#type: "function".to_string(),
                     function: Some(ToolFunction {
-                        name: "test_tool".to_string(),
-                        arguments: "{}".to_string(),
+                        name: tool_call["name"].as_str().unwrap().to_string(),
+                        arguments: tool_call["arguments"].as_str().unwrap().to_string(),
                     }),
                     ..Default::default()
                 }]),
@@ -1795,7 +1813,7 @@ mod tests {
             "gemini-3.7-flash-high",
             None,
             &routing_session_id,
-            Some(&previous_response_id),
+            None,
             true,
         );
         let contents = body["request"]["contents"].as_array().unwrap();
