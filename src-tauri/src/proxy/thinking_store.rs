@@ -1197,7 +1197,7 @@ impl SessionScope {
         tenant_id: Option<&str>,
     ) -> Self {
         let fallback = fallback.into();
-        let tenant = tenant_component(headers, tenant_id);
+        let tenant = Self::tenant_key(headers, tenant_id);
         let winner = stable_session_winner(headers, body, query);
         let affinity_anchor = if winner.is_some() {
             ""
@@ -1214,6 +1214,33 @@ impl SessionScope {
             affinity_id,
             affinity_key,
         }
+    }
+
+    /// Tenant namespace shared by history, signatures, and session management.
+    pub(crate) fn tenant_key(headers: &HeaderMap, tenant_id: Option<&str>) -> String {
+        tenant_component(headers, tenant_id)
+    }
+
+    /// Resolve an ID returned by a generation response without hashing it again.
+    /// Caller-supplied tenant prefixes are never accepted.
+    pub(crate) fn store_key_for_client_id(
+        headers: &HeaderMap,
+        client_id: &str,
+        tenant_id: Option<&str>,
+    ) -> Option<String> {
+        let suffix = client_id.strip_prefix("sess-")?;
+        if suffix.len() != 16
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return None;
+        }
+        Some(format!(
+            "{}:{}",
+            Self::tenant_key(headers, tenant_id),
+            client_id
+        ))
     }
 
     pub fn purge_signatures(&self, model: &str) {
@@ -1985,13 +2012,7 @@ fn tenant_component(headers: &HeaderMap, tenant_id: Option<&str>) -> String {
 }
 
 fn tenant_from_headers(headers: &HeaderMap) -> String {
-    let raw = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer ").or(Some(s)))
-        .or_else(|| headers.get("x-api-key").and_then(|h| h.to_str().ok()))
-        .or_else(|| headers.get("x-goog-api-key").and_then(|h| h.to_str().ok()))
-        .unwrap_or("anon");
+    let raw = crate::proxy::middleware::auth::extract_api_key(headers).unwrap_or("anon");
     hash16(raw)
 }
 

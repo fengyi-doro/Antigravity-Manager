@@ -494,15 +494,63 @@ pub struct DynamicTierRouter;
 
 impl DynamicTierRouter {
     pub fn resolve(model: &str, client_effort: Option<&str>) -> Option<String> {
+        let base = Self::bare_base(model)?;
+        let available_tiers = crate::models::OfficialModelCatalog::collect_tiers_for_base(&base);
+        Self::resolve_from_tiers(&base, client_effort, &available_tiers)
+    }
+
+    /// Account availability must come from exact IDs in that account's directory.
+    /// The global catalog also contains embedded metadata and models seen on other
+    /// accounts, so it cannot establish that a generated tier exists for this one.
+    pub fn resolve_with_available_models(
+        model: &str,
+        client_effort: Option<&str>,
+        available_models: &std::collections::HashSet<String>,
+    ) -> Option<String> {
+        let base = Self::bare_base(model)?;
+        let prefix = format!("{}-", base);
+        let mut available_tiers: Vec<String> = available_models
+            .iter()
+            .filter_map(|id| {
+                let id = id.trim().to_lowercase();
+                let suffix = id.strip_prefix(&prefix)?;
+                crate::models::official_model::KNOWN_TIER_SUFFIXES
+                    .contains(&suffix)
+                    .then(|| suffix.to_string())
+            })
+            .collect();
+        // Stable ordering also makes equal-distance effort fallbacks deterministic.
+        available_tiers.sort_by_key(|tier| (tier_weight(tier), tier.clone()));
+        available_tiers.dedup();
+
+        let has_native_base = available_models
+            .iter()
+            .any(|id| id.trim().eq_ignore_ascii_case(&base));
+        if has_native_base
+            && !client_effort
+                .and_then(normalize_client_thinking_level)
+                .is_some_and(|effort| {
+                    available_tiers
+                        .iter()
+                        .any(|tier| tier.eq_ignore_ascii_case(effort))
+                })
+        {
+            return Some(base);
+        }
+        let routed = Self::resolve_from_tiers(&base, client_effort, &available_tiers)?;
+        available_models
+            .iter()
+            .any(|id| id.trim().eq_ignore_ascii_case(&routed))
+            .then_some(routed)
+    }
+
+    fn bare_base(model: &str) -> Option<String> {
         let clean = model.trim().to_lowercase();
 
         // 1. 若当前模型名本身已经带有档位后缀（如 -high, -low, -tiered 等），说明已经是指向具名变体，不在此解析
-        if clean.ends_with("-high")
-            || clean.ends_with("-medium")
-            || clean.ends_with("-low")
-            || clean.ends_with("-extra-low")
-            || clean.ends_with("-tiered")
-            || clean.ends_with("-lite")
+        if crate::models::official_model::KNOWN_TIER_SUFFIXES
+            .iter()
+            .any(|tier| clean.ends_with(&format!("-{}", tier)))
             || clean.ends_with("-agent")
         {
             return None;
@@ -522,9 +570,14 @@ impl DynamicTierRouter {
             return None;
         }
 
-        // 2. 动态收集属于该 base 模型的所有可用档位后缀
-        let available_tiers = crate::models::OfficialModelCatalog::collect_tiers_for_base(&base);
+        Some(base)
+    }
 
+    fn resolve_from_tiers(
+        base: &str,
+        client_effort: Option<&str>,
+        available_tiers: &[String],
+    ) -> Option<String> {
         if available_tiers.is_empty() {
             return None;
         }

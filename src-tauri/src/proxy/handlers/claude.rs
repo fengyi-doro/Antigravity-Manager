@@ -69,6 +69,23 @@ pub static COWORK_COMPACT_SESSIONS: LazyLock<DashMap<String, CoworkCompactState>
     LazyLock::new(DashMap::new);
 pub const MAX_COMPACT_SESSIONS_CAPACITY: usize = 1000;
 
+fn compaction_session_key(
+    headers: &HeaderMap,
+    original_body: &Value,
+    request: &ClaudeRequest,
+    tenant_id: Option<&str>,
+) -> String {
+    let anchor = crate::proxy::session_manager::SessionManager::extract_session_id(request);
+    crate::proxy::thinking_store::SessionScope::resolve(
+        headers,
+        Some(original_body),
+        None,
+        anchor,
+        tenant_id,
+    )
+    .affinity_key
+}
+
 /// 近期触发压缩（手动或自动）的会话集合 (Session -> 触发时刻)，用于跨轮次对齐
 pub static PENDING_COMPACT_SESSIONS: LazyLock<DashMap<String, std::time::Instant>> =
     LazyLock::new(DashMap::new);
@@ -576,6 +593,58 @@ use super::common::{apply_retry_strategy, should_rotate_account, RetryStrategy};
 mod variant_tests {
     use super::*;
 
+    #[test]
+    fn compaction_gate_is_isolated_between_users_with_the_same_client_session() {
+        let body = json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}]
+        });
+        let request: ClaudeRequest = serde_json::from_value(body.clone()).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-session-id",
+            uuid::Uuid::new_v4().to_string().parse().unwrap(),
+        );
+        let user_a = compaction_session_key(&headers, &body, &request, Some("user-a"));
+        let user_b = compaction_session_key(&headers, &body, &request, Some("user-b"));
+        assert_ne!(user_a, user_b);
+
+        COWORK_COMPACT_SESSIONS.insert(
+            user_a.clone(),
+            CoworkCompactState {
+                kind: CoworkCompactKind::Manual,
+                before_tokens: 1000,
+                ts: std::time::Instant::now(),
+                summary_done: false,
+                target_limit: 500,
+            },
+        );
+        assert!(is_session_in_compaction(&user_a));
+        assert!(!is_session_in_compaction(&user_b));
+        COWORK_COMPACT_SESSIONS.remove(&user_a);
+    }
+
+    #[test]
+    fn compaction_summary_keeps_the_same_tenant_session_gate() {
+        let body = json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "original request"}]
+        });
+        let summary_body = json!({
+            "model": "claude-sonnet-4-6",
+            "system": "Summarize the conversation",
+            "messages": [{"role": "user", "content": "summary request"}]
+        });
+        let request: ClaudeRequest = serde_json::from_value(body.clone()).unwrap();
+        let summary: ClaudeRequest = serde_json::from_value(summary_body.clone()).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", "client-conversation".parse().unwrap());
+        assert_eq!(
+            compaction_session_key(&headers, &body, &request, Some("user-a")),
+            compaction_session_key(&headers, &summary_body, &summary, Some("user-a")),
+        );
+    }
+
     fn request_with_effort(model: &str, effort: &str, budget_tokens: u32) -> ClaudeRequest {
         serde_json::from_value(json!({
             "model": model,
@@ -826,6 +895,7 @@ pub async fn handle_messages(
             }
         };
 
+    let requested_model = request.model.clone();
     // 0. 自定义映射优先拦截 (用户自定义路由与热更新规则拥有最高优先级，避免被后续变体推断抹平原模型意图)
     let custom_target = {
         let custom_mapping = state.custom_mapping.read().await;
@@ -1011,13 +1081,14 @@ pub async fn handle_messages(
 
     // [全链路会话生命周期与自愈分流体系 (Pipeline First)]
     // 提取会话唯一标识（优先提取产品专属会话头或内容锚点）
-    let session_key =
-        crate::proxy::thinking_store::stable_session_winner(&headers, Some(&original_body), None)
-            .unwrap_or_else(|| {
-                let anchor =
-                    crate::proxy::session_manager::SessionManager::extract_session_id(&request);
-                crate::proxy::thinking_store::derive_winner_session_id("anon", None, &anchor)
-            });
+    let session_key = compaction_session_key(
+        &headers,
+        &original_body,
+        &request,
+        user_identity
+            .as_ref()
+            .map(|identity| identity.token_id.as_str()),
+    );
 
     // 维持状态机容量，执行条目级细粒度 TTL 清理，彻底避免粗暴全量 clear() 导致的 herd invalidation
     if COMPACTION_IMMUNITY_LEASES.len() > 1000 {
@@ -1699,6 +1770,14 @@ pub async fn handle_messages(
             }
         };
 
+        let mapped_model = token_manager.resolve_bare_model_for_account(
+            &account_id,
+            &requested_model,
+            &mapped_model,
+            &*state.custom_mapping.read().await,
+            effort_hint.as_deref(),
+        );
+        last_mapped_model = Some(mapped_model.clone());
         last_email = Some(email.clone());
         info!("✓ Using account: {} (type: {})", email, config.request_type);
 
@@ -1897,6 +1976,7 @@ pub async fn handle_messages(
             .await;
         }
 
+        let fallback_attempts = call_result.fallback_attempts;
         let response = call_result.response;
         // [NEW] 提取实际请求的上游端点 URL，用于日志记录和排查
         let upstream_url = response.url().to_string();
@@ -2279,6 +2359,12 @@ pub async fn handle_messages(
             .text()
             .await
             .unwrap_or_else(|_| format!("HTTP {}", status));
+        let error_text = crate::proxy::upstream::client::annotate_upstream_error(
+            error_text,
+            &fallback_attempts,
+            &upstream_url,
+            status_code,
+        );
         last_error = format!("HTTP {}: {}", status_code, error_text);
         debug!("[{}] Upstream Error Response: {}", trace_id, error_text);
         if debug_logger::is_enabled(&debug_cfg) {

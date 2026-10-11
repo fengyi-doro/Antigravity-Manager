@@ -194,6 +194,7 @@ pub async fn handle_generate(
         &*state.custom_mapping.read().await,
         client_effort,
     );
+    let mut last_mapped_model = initial_mapped_model.clone();
 
     while let Some(attempt) = next_rotation_attempt(
         &mut used_attempts,
@@ -324,10 +325,18 @@ pub async fn handle_generate(
             }
         };
 
+        let mapped_model = token_manager.resolve_bare_model_for_account(
+            &account_id,
+            &model_name,
+            &mapped_model,
+            &*state.custom_mapping.read().await,
+            client_effort,
+        );
         let mapped_model = token_manager
             .resolve_dynamic_model_for_account(&account_id, &mapped_model)
             .await;
 
+        last_mapped_model = mapped_model.clone();
         last_email = Some(email.clone());
         info!("✓ Using account: {} (type: {})", email, config.request_type);
 
@@ -476,6 +485,7 @@ pub async fn handle_generate(
             .await;
         }
 
+        let fallback_attempts = call_result.fallback_attempts;
         let response = call_result.response;
         // [NEW] 提取实际请求的上游端点 URL，用于日志记录和排查
         let upstream_url = response.url().to_string();
@@ -965,6 +975,12 @@ pub async fn handle_generate(
             .text()
             .await
             .unwrap_or_else(|_| format!("HTTP {}", status_code));
+        let error_text = crate::proxy::upstream::client::annotate_upstream_error(
+            error_text,
+            &fallback_attempts,
+            &upstream_url,
+            status_code,
+        );
         last_error = format!("HTTP {}: {}", status_code, error_text);
         if debug_logger::is_enabled(&debug_cfg) {
             let payload = json!({
@@ -1213,7 +1229,7 @@ pub async fn handle_generate(
     // 所有尝试均失败：仅当全部结构化失败状态均为 429 时返回 429
     let final_status = failure_statuses.final_status();
     let headers = build_token_error_headers(
-        Some(initial_mapped_model.as_str()),
+        Some(last_mapped_model.as_str()),
         last_email.as_deref(),
         &last_error,
     );
@@ -1221,7 +1237,7 @@ pub async fn handle_generate(
     let dual_err = crate::proxy::handlers::common::build_dual_track_error(
         "gemini",
         final_status.as_u16(),
-        initial_mapped_model.as_str(),
+        last_mapped_model.as_str(),
         &last_error,
     );
 
