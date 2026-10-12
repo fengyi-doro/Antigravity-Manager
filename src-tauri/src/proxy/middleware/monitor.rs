@@ -862,9 +862,12 @@ pub async fn monitor_middleware(
             let token = identity.token_id.clone();
             let requested_model = model.clone().unwrap_or_else(|| "unknown".into());
             let admission = antigravity_portal::blocking(move || {
-                antigravity_portal::instance()?
-                    .store
-                    .begin_billing(&token, &requested_model)
+                let portal = antigravity_portal::instance()?;
+                portal.store.begin_billing_with_policy(
+                    &token,
+                    &requested_model,
+                    portal.config.require_email_verification,
+                )
             })
             .await;
             match admission {
@@ -1718,7 +1721,10 @@ pub async fn monitor_middleware(
                 Response::from_parts(parts, Body::from(bytes))
             }
             Err(_) => {
-                log.response_body = Some("[Response too large (>100MB)]".to_string());
+                log.status = 502;
+                log.error =
+                    Some("Upstream response body interrupted or exceeded the 100MB limit".into());
+                log.response_body = log.error.clone();
 
                 // Record User Token Usage (even if too large)
                 record_user_token_usage(
@@ -1729,7 +1735,15 @@ pub async fn monitor_middleware(
                 );
 
                 monitor.log_request(log).await;
-                Response::from_parts(parts, Body::empty())
+                let mut parts = parts;
+                parts.status = axum::http::StatusCode::BAD_GATEWAY;
+                parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+                parts.headers.remove(axum::http::header::CONTENT_ENCODING);
+                parts.headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/json"),
+                );
+                Response::from_parts(parts, Body::from(serde_json::json!({"error":{"code":"upstream_response_error","message":"Unable to read upstream response"}}).to_string()))
             }
         }
     } else {

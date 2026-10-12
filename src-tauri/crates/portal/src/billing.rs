@@ -71,13 +71,22 @@ impl Store {
 
     /// Record admission before the upstream call. No wallet means a legacy unbilled key.
     pub fn begin_billing(&self, token: &str, model: &str) -> Result<Option<String>> {
+        self.begin_billing_with_policy(token, model, false)
+    }
+
+    pub fn begin_billing_with_policy(
+        &self,
+        token: &str,
+        model: &str,
+        require_verified: bool,
+    ) -> Result<Option<String>> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let account = tx.query_row("SELECT w.user_id,w.balance_nano,u.enabled FROM billing_token_owners n JOIN wallets w ON w.user_id=n.user_id JOIN users u ON u.id=n.user_id WHERE n.token_id=?1",[token],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,bool>(2)?))).optional()?;
-        let Some((user, balance, enabled)) = account else {
+        let account = tx.query_row("SELECT w.user_id,w.balance_nano,u.enabled,u.email_verified FROM billing_token_owners n JOIN wallets w ON w.user_id=n.user_id JOIN users u ON u.id=n.user_id WHERE n.token_id=?1",[token],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,bool>(2)?,r.get::<_,bool>(3)?))).optional()?;
+        let Some((user, balance, enabled, verified)) = account else {
             return Ok(None);
         };
-        if !enabled {
+        if !enabled || (require_verified && !verified) {
             return Err(Error::Forbidden);
         }
         if balance <= 0 {

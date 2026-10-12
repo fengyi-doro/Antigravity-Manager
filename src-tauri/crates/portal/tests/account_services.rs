@@ -15,6 +15,15 @@ fn mail_challenges_are_bound_expiring_single_use_and_reset_invalidates_sessions(
         .register("b@example.invalid", "old-password", now)
         .unwrap();
     p.store.require_verification(&a.id).unwrap();
+    // Enabling mandatory verification also gates a previously issued native key.
+    let native = p.ensure_native_token(&a).unwrap().unwrap();
+    p.store
+        .credit_wallet(&a.id, 100, "verification-credit")
+        .unwrap();
+    assert!(p
+        .store
+        .begin_billing_with_policy(&native.id, "model", true)
+        .is_err());
     let (_, old) = p
         .store
         .issue_challenge(&a.email, "verify", now)
@@ -41,6 +50,12 @@ fn mail_challenges_are_bound_expiring_single_use_and_reset_invalidates_sessions(
         .consume_challenge(&code, "verify", Some(&a.id), None, now)
         .unwrap();
     assert!(p.store.email_verified(&a.id).unwrap());
+    let billing = p
+        .store
+        .begin_billing_with_policy(&native.id, "model", true)
+        .unwrap()
+        .unwrap();
+    p.store.settle_billing(&billing, 502, None).unwrap();
     assert!(p
         .store
         .consume_challenge(&code, "verify", Some(&a.id), None, now)
