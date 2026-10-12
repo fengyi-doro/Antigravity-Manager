@@ -1,0 +1,56 @@
+name: Bookworm gateway acceptance artifact
+on:
+  push:
+    branches: ['codex/acceptance-bookworm-20261013']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    timeout-minutes: 45
+    env:
+      RUST_MIN_STACK: '16777216'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - name: Install runtime build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libnm-dev xdg-utils
+      - uses: actions/checkout@v4
+        with:
+          ref: 200cd92409602385ead2aabf61a259a5e005542d
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: bookworm-acceptance
+      - run: npm ci --legacy-peer-deps
+      - run: npm run build
+      - name: Build exact reviewed source
+        run: |
+          cd src-tauri
+          cargo build --release --locked --bin antigravity-tools
+      - name: Run raw failure capture regression
+        run: |
+          cd src-tauri
+          cargo test --release --lib capture_failure_tests -- --test-threads=1
+      - name: Record source and binary checksums
+        run: |
+          echo 200cd92409602385ead2aabf61a259a5e005542d > source-sha.txt
+          sha256sum src-tauri/target/release/antigravity-tools > binary-sha256.txt
+          rustc -V > build-toolchain.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bookworm-gateway-200cd92
+          retention-days: 7
+          path: |
+            src-tauri/target/release/antigravity-tools
+            dist/
+            source-sha.txt
+            binary-sha256.txt
+            build-toolchain.txt
