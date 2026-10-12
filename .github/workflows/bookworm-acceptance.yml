@@ -16,7 +16,7 @@ jobs:
       - name: Install runtime build dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libnm-dev xdg-utils
+          apt-get install -y --no-install-recommends ca-certificates curl git build-essential cmake clang libclang-dev nasm pkg-config libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libnm-dev xdg-utils
       - uses: actions/checkout@v4
         with:
           ref: 200cd92409602385ead2aabf61a259a5e005542d
