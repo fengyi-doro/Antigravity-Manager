@@ -18,6 +18,7 @@ pub mod oauth_server;
 pub mod portal_tokens;
 pub mod process;
 pub mod proxy_db;
+pub(crate) mod proxy_log_filter;
 pub mod quota;
 pub mod scheduler;
 pub mod security_db;
