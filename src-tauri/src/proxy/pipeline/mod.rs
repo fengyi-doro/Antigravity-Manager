@@ -13,6 +13,7 @@ pub mod inbound;
 #[cfg(test)]
 mod official_alignment_tests;
 pub mod policy;
+pub mod stream_completion;
 pub mod usage;
 
 pub use auto_heal::{wrap_stream_with_empty_thinking_auto_heal, ThinkingAutoHealContext};

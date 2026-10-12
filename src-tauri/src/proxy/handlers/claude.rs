@@ -2062,10 +2062,7 @@ pub async fn handle_messages(
                             .chain(stream_rest.map(|result| -> Result<Bytes, std::io::Error> {
                                 match result {
                                     Ok(b) => Ok(b),
-                                    Err(e) => Ok(Bytes::from(format!(
-                                        "data: {{\"error\":\"{}\"}}\n\n",
-                                        e
-                                    ))),
+                                    Err(e) => Err(std::io::Error::other(e.to_string())),
                                 }
                             }));
 
@@ -2079,7 +2076,7 @@ pub async fn handle_messages(
                                     Ok(None) => break,
                                     Err(_) => {
                                         tracing::error!("[Claude-SSE] Idle timeout after 120s, terminating stream");
-                                        yield Ok::<Bytes, std::io::Error>(Bytes::from("data: {\"type\": \"message_stop\"}\n\ndata: [DONE]\n\n"));
+                                        yield Err::<Bytes, std::io::Error>(std::io::Error::new(std::io::ErrorKind::TimedOut, "Upstream stream idle timeout"));
                                         break;
                                     }
                                 }

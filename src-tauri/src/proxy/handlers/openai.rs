@@ -2551,7 +2551,7 @@ pub async fn handle_chat_completions(
                             Err(_) => {
                                 tracing::error!("[OpenAI-SSE] Idle timeout after 300s, terminating stream");
                                 stream_failed = true;
-                                yield Ok::<Bytes, String>(Bytes::from("data: [DONE]\n\n"));
+                                yield Err::<Bytes, String>("Upstream stream idle timeout".into());
                                 break;
                             }
                         }
@@ -6174,7 +6174,7 @@ async fn handle_websocket_session(
         tool_call_cache: std::collections::HashMap::new(),
     };
 
-    while let Some(msg_result) = socket.recv().await {
+    'messages: while let Some(msg_result) = socket.recv().await {
         let msg = match msg_result {
             Ok(m) => m,
             Err(e) => {
@@ -6276,9 +6276,12 @@ async fn handle_websocket_session(
                 .unwrap_or("unknown")
                 .to_owned();
             match antigravity_portal::blocking(move || {
-                antigravity_portal::instance()?
-                    .store
-                    .begin_billing(&token, &model)
+                let portal = antigravity_portal::instance()?;
+                portal.store.begin_billing_with_policy(
+                    &token,
+                    &model,
+                    portal.config.require_email_verification,
+                )
             })
             .await
             {
@@ -6295,18 +6298,32 @@ async fn handle_websocket_session(
                 }
             }
         }
-        let response_result = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
-            .scope(
-                holder.clone(),
-                handle_chat_completions(
-                    State(state.clone()),
-                    headers.clone(),
-                    None,
-                    identity.clone(),
-                    Json(openai_body),
-                ),
-            )
-            .await;
+        let generation = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE.scope(
+            holder.clone(),
+            handle_chat_completions(
+                State(state.clone()),
+                headers.clone(),
+                None,
+                identity.clone(),
+                Json(openai_body),
+            ),
+        );
+        tokio::pin!(generation);
+        let response_result = loop {
+            tokio::select! {
+                response = &mut generation => break response,
+                message = socket.recv() => match message {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => { holder.settle_billing(499); return; },
+                    Some(Ok(Message::Text(text))) => {
+                        let cancelled = serde_json::from_str::<Value>(&text).ok().and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_owned)).as_deref() == Some("response.cancel");
+                        if cancelled { holder.settle_billing(499); continue 'messages; }
+                        if socket.send(Message::Text(json!({"type":"error","error":{"type":"invalid_request_error","message":"A response is already in progress"}}).to_string())).await.is_err() { holder.settle_billing(499); return; }
+                    },
+                    Some(Ok(Message::Ping(data))) => { if socket.send(Message::Pong(data)).await.is_err() { holder.settle_billing(499); return; } },
+                    _ => {},
+                }
+            }
+        };
 
         let response = match response_result {
             Ok(res) => res.into_response(),
@@ -6342,6 +6359,7 @@ async fn handle_websocket_session(
         let mut stream = body.into_data_stream();
 
         let mut translation_state = TranslationState {
+            delivery_failed: false,
             response_id: format!("resp-{}", &Uuid::new_v4().to_string()[..24]),
             item_id: format!("item-{}", &Uuid::new_v4().to_string()[..16]),
             message_output_index: None,
@@ -6364,14 +6382,29 @@ async fn handle_websocket_session(
             }
         });
         let mut outgoing_ws_events = Vec::new();
-        send_ws_event(&mut socket, &mut outgoing_ws_events, &created_ev).await;
+        if !send_ws_event(&mut socket, &mut outgoing_ws_events, &created_ev).await {
+            holder.settle_billing(499);
+            break;
+        }
 
         let mut buffer = bytes::BytesMut::new();
-        while let Some(chunk_res) = stream.next().await {
+        let mut stream_status = 200;
+        'response_stream: loop {
+            let chunk_res = tokio::select! {
+                chunk = stream.next() => match chunk { Some(chunk) => chunk, None => break },
+                message = socket.recv() => match message {
+                    Some(Ok(Message::Ping(data))) => { if socket.send(Message::Pong(data)).await.is_err() { stream_status = 499; break; } continue; },
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => { stream_status = 499; break; },
+                    Some(Ok(Message::Text(text))) if serde_json::from_str::<Value>(&text).ok().and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_owned)).as_deref() == Some("response.cancel") => { stream_status = 499; break; },
+                    Some(Ok(Message::Text(_))) => { if socket.send(Message::Text(json!({"type":"error","error":{"type":"invalid_request_error","message":"A response is already in progress"}}).to_string())).await.is_err() { stream_status = 499; break; } continue; },
+                    _ => continue,
+                }
+            };
             let chunk = match chunk_res {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!("Stream chunk error: {:?}", e);
+                    stream_status = 502;
                     break;
                 }
             };
@@ -6388,6 +6421,10 @@ async fn handle_websocket_session(
                         break;
                     }
                     if let Ok(chunk_json) = serde_json::from_str::<Value>(json_part) {
+                        if crate::proxy::diagnostics::response_failed(&chunk_json) {
+                            stream_status = 502;
+                            break 'response_stream;
+                        }
                         translate_openai_chunk_to_ws(
                             &chunk_json,
                             &mut translation_state,
@@ -6395,12 +6432,28 @@ async fn handle_websocket_session(
                             &mut outgoing_ws_events,
                         )
                         .await;
+                        if translation_state.delivery_failed {
+                            stream_status = 499;
+                            break 'response_stream;
+                        }
                     }
                 }
             }
         }
 
-        holder.settle_billing(200);
+        drop(stream);
+        if stream_status != 200 || holder.stream_failure().is_some() {
+            holder.settle_billing(if stream_status == 200 {
+                502
+            } else {
+                stream_status
+            });
+            if stream_status == 499 {
+                break;
+            }
+            let _ = socket.send(Message::Text(json!({"type":"error","error":{"type":"server_error","message":"Upstream response stream failed"}}).to_string())).await;
+            continue;
+        }
         if !buffer.is_empty() {
             if let Ok(line_str) = std::str::from_utf8(&buffer) {
                 let line = line_str.trim();
@@ -6428,6 +6481,14 @@ async fn handle_websocket_session(
             &mut outgoing_ws_events,
         )
         .await;
+        holder.settle_billing(if translation_state.delivery_failed {
+            499
+        } else {
+            200
+        });
+        if translation_state.delivery_failed {
+            break;
+        }
         if debug_logger::is_enabled(&debug_cfg) {
             let payload_log = json!({
                 "kind": "codex_websocket_converted_response",
@@ -7046,6 +7107,7 @@ fn convert_codex_to_openai_request(mut body: Value) -> Value {
 }
 
 struct TranslationState {
+    delivery_failed: bool,
     response_id: String,
     item_id: String,
     message_output_index: Option<u32>,
@@ -7058,9 +7120,9 @@ struct TranslationState {
     tool_calls_added: std::collections::HashSet<u32>,
 }
 
-async fn send_ws_event(socket: &mut WebSocket, ws_events: &mut Vec<Value>, event: &Value) {
+async fn send_ws_event(socket: &mut WebSocket, ws_events: &mut Vec<Value>, event: &Value) -> bool {
     ws_events.push(event.clone());
-    let _ = socket.send(Message::Text(event.to_string())).await;
+    socket.send(Message::Text(event.to_string())).await.is_ok()
 }
 
 async fn translate_openai_chunk_to_ws(
@@ -7091,7 +7153,8 @@ async fn translate_openai_chunk_to_ws(
                             "summary_index": 0,
                             "delta": reasoning
                         });
-                        send_ws_event(socket, ws_events, &reasoning_ev).await;
+                        state.delivery_failed |=
+                            !send_ws_event(socket, ws_events, &reasoning_ev).await;
 
                         if !state.message_item_added {
                             let item_added = json!({
@@ -7106,7 +7169,8 @@ async fn translate_openai_chunk_to_ws(
                                     "content": []
                                 }
                             });
-                            send_ws_event(socket, ws_events, &item_added).await;
+                            state.delivery_failed |=
+                                !send_ws_event(socket, ws_events, &item_added).await;
 
                             let part_added = json!({
                                 "type": "response.content_part.added",
@@ -7118,7 +7182,8 @@ async fn translate_openai_chunk_to_ws(
                                     "text": ""
                                 }
                             });
-                            send_ws_event(socket, ws_events, &part_added).await;
+                            state.delivery_failed |=
+                                !send_ws_event(socket, ws_events, &part_added).await;
                             state.message_item_added = true;
                             state.content_part_added = true;
                         }
@@ -7130,7 +7195,7 @@ async fn translate_openai_chunk_to_ws(
                             "content_index": 0,
                             "delta": reasoning
                         });
-                        send_ws_event(socket, ws_events, &delta_ev).await;
+                        state.delivery_failed |= !send_ws_event(socket, ws_events, &delta_ev).await;
                         state.accumulated_text.push_str(reasoning);
                     }
                 }
@@ -7159,7 +7224,8 @@ async fn translate_openai_chunk_to_ws(
                                     "content": []
                                 }
                             });
-                            send_ws_event(socket, ws_events, &item_added).await;
+                            state.delivery_failed |=
+                                !send_ws_event(socket, ws_events, &item_added).await;
 
                             let part_added = json!({
                                 "type": "response.content_part.added",
@@ -7171,7 +7237,8 @@ async fn translate_openai_chunk_to_ws(
                                     "text": ""
                                 }
                             });
-                            send_ws_event(socket, ws_events, &part_added).await;
+                            state.delivery_failed |=
+                                !send_ws_event(socket, ws_events, &part_added).await;
                             state.message_item_added = true;
                             state.content_part_added = true;
                         }
@@ -7183,7 +7250,7 @@ async fn translate_openai_chunk_to_ws(
                             "content_index": 0,
                             "delta": content
                         });
-                        send_ws_event(socket, ws_events, &delta_ev).await;
+                        state.delivery_failed |= !send_ws_event(socket, ws_events, &delta_ev).await;
                         state.accumulated_text.push_str(content);
                     }
                 }
@@ -7258,7 +7325,8 @@ async fn translate_openai_chunk_to_ws(
                                     "output_index": tool_output_index,
                                     "item": item_obj
                                 });
-                                send_ws_event(socket, ws_events, &tool_added).await;
+                                state.delivery_failed |=
+                                    !send_ws_event(socket, ws_events, &tool_added).await;
                                 state.tool_calls_added.insert(tc_idx);
                             }
 
@@ -7269,7 +7337,8 @@ async fn translate_openai_chunk_to_ws(
                                     "output_index": tool_output_index,
                                     "delta": tc_args
                                 });
-                                send_ws_event(socket, ws_events, &args_delta).await;
+                                state.delivery_failed |=
+                                    !send_ws_event(socket, ws_events, &args_delta).await;
                             }
                         }
                     }
@@ -7306,7 +7375,7 @@ async fn finalize_ws_events(
                 "output_index": tool_output_index,
                 "arguments": args
             });
-            send_ws_event(socket, ws_events, &args_done).await;
+            state.delivery_failed |= !send_ws_event(socket, ws_events, &args_done).await;
 
             let (actual_name, namespace) = split_namespace_tool_name(name);
             let mut item_obj = serde_json::json!({
@@ -7326,7 +7395,7 @@ async fn finalize_ws_events(
                 "output_index": tool_output_index,
                 "item": item_obj
             });
-            send_ws_event(socket, ws_events, &tool_done).await;
+            state.delivery_failed |= !send_ws_event(socket, ws_events, &tool_done).await;
 
             let tc_val = item_obj.clone();
 
@@ -7347,7 +7416,7 @@ async fn finalize_ws_events(
             "content_index": 0,
             "text": &state.accumulated_text
         });
-        send_ws_event(socket, ws_events, &text_done).await;
+        state.delivery_failed |= !send_ws_event(socket, ws_events, &text_done).await;
 
         let part_done = json!({
             "type": "response.content_part.done",
@@ -7359,7 +7428,7 @@ async fn finalize_ws_events(
                 "text": &state.accumulated_text
             }
         });
-        send_ws_event(socket, ws_events, &part_done).await;
+        state.delivery_failed |= !send_ws_event(socket, ws_events, &part_done).await;
 
         let message_done = json!({
             "type": "response.output_item.done",
@@ -7376,7 +7445,7 @@ async fn finalize_ws_events(
                 }]
             }
         });
-        send_ws_event(socket, ws_events, &message_done).await;
+        state.delivery_failed |= !send_ws_event(socket, ws_events, &message_done).await;
 
         output_items.push(json!({
             "id": &state.item_id,
@@ -7400,7 +7469,7 @@ async fn finalize_ws_events(
             "output": output_items
         }
     });
-    send_ws_event(socket, ws_events, &completed_ev).await;
+    state.delivery_failed |= !send_ws_event(socket, ws_events, &completed_ev).await;
 
     json!(output_items)
 }

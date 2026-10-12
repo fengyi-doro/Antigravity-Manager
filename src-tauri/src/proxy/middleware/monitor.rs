@@ -298,6 +298,12 @@ fn record_user_token_usage(
     user_agent: Option<String>,
     upstream_holder: &UpstreamRequestBodyHolder,
 ) {
+    if (200..300).contains(&log.status) {
+        if let Some(reason) = upstream_holder.stream_failure() {
+            log.status = 502;
+            log.error = Some(reason);
+        }
+    }
     log.diagnostics = Some(upstream_holder.diagnostics(log.status, log.error.as_deref()));
     upstream_holder.settle_billing(log.status);
     if let Some(identity) = user_token_identity {
@@ -733,8 +739,15 @@ pub async fn monitor_middleware(
 
     let method = request.method().to_string();
     let uri = request.uri().to_string();
+    let path = request.uri().path().to_owned();
 
-    if uri.contains("event_logging") || uri.contains("/api/") || uri.starts_with("/internal/") {
+    if path.starts_with("/api/")
+        || path.starts_with("/internal/")
+        || matches!(
+            path.as_str(),
+            "/v1/api/event_logging" | "/v1/api/event_logging/batch"
+        )
+    {
         return next.run(request).await;
     }
 
@@ -852,12 +865,7 @@ pub async fn monitor_middleware(
 
     let upstream_holder = UpstreamRequestBodyHolder::new();
     // Count/model discovery endpoints are free. Admission fails closed if accounting is unavailable.
-    if method == "POST"
-        && !uri.contains("count_tokens")
-        && !uri.contains("countTokens")
-        && !uri.starts_with("/v1/thinking/")
-        && !uri.starts_with("/v1/models/detect")
-    {
+    if crate::proxy::billing_policy::is_billable(&method, &path) {
         if let Some(identity) = &user_token_identity {
             let token = identity.token_id.clone();
             let requested_model = model.clone().unwrap_or_else(|| "unknown".into());

@@ -178,6 +178,7 @@ pub(crate) struct UpstreamCapture {
     previous_usage: crate::proxy::pipeline::CanonicalUsage,
     attempts: Vec<crate::proxy::diagnostics::UpstreamAttempt>,
     total_attempts: u32,
+    stream_failure: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -188,6 +189,28 @@ tokio::task_local! {
 }
 
 impl UpstreamRequestBodyHolder {
+    /// A handler retry starts a new generation; failed attempts must not donate usage.
+    /// Auto-heal continuation deliberately uses next_usage_call instead.
+    pub fn begin_generation_attempt(&self) {
+        if let Ok(mut lock) = self.0.lock() {
+            lock.stream_failure = None;
+            lock.usage = None;
+            lock.previous_usage = Default::default();
+        }
+    }
+
+    pub fn mark_stream_failure(&self, reason: &str) {
+        if let Ok(mut lock) = self.0.lock() {
+            lock.stream_failure.get_or_insert_with(|| reason.to_owned());
+        }
+    }
+
+    pub fn stream_failure(&self) -> Option<String> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|lock| lock.stream_failure.clone())
+    }
     pub fn billing_id(&self) -> Option<String> {
         self.0.lock().ok().and_then(|lock| lock.billing_id.clone())
     }
@@ -242,6 +265,9 @@ impl UpstreamRequestBodyHolder {
     }
 
     pub fn capture_usage(&self, raw: &serde_json::Value) {
+        if crate::proxy::diagnostics::response_failed(raw) {
+            self.mark_stream_failure("Upstream returned an error response");
+        }
         let raw = raw.get("response").unwrap_or(raw);
         if let Some(usage) = raw.get("usageMetadata") {
             if usage.get("promptTokenCount").is_none() && usage.get("total_input_tokens").is_none()
@@ -256,6 +282,9 @@ impl UpstreamRequestBodyHolder {
 
     /// Image batches perform independent parallel generations under one request.
     pub fn capture_additive_usage(&self, raw: &serde_json::Value) {
+        if crate::proxy::diagnostics::response_failed(raw) {
+            self.mark_stream_failure("Upstream returned an error response");
+        }
         let raw = raw.get("response").unwrap_or(raw);
         if let Some(usage) = raw.get("usageMetadata") {
             if usage.get("promptTokenCount").is_none() && usage.get("total_input_tokens").is_none()
@@ -276,6 +305,11 @@ impl UpstreamRequestBodyHolder {
 
     pub fn settle_billing(&self, status: u16) {
         if let Ok(lock) = self.0.lock() {
+            let status = if (200..300).contains(&status) && lock.stream_failure.is_some() {
+                502
+            } else {
+                status
+            };
             if let Some(id) = &lock.billing_id {
                 let result = antigravity_portal::instance().and_then(|portal| {
                     portal.store.settle_billing(
@@ -331,6 +365,28 @@ impl UpstreamRequestBodyHolder {
 
     pub fn take_headers(&self) -> Option<String> {
         self.0.lock().ok().and_then(|mut g| g.headers.take())
+    }
+}
+
+#[cfg(test)]
+mod capture_failure_tests {
+    use super::UpstreamRequestBodyHolder;
+
+    #[test]
+    fn raw_errors_survive_usage_capture_and_adapter_conversion() {
+        for raw in [
+            serde_json::json!({"error":{"message":"failed"}}),
+            serde_json::json!({"error":{"message":"failed"},"usageMetadata":{"promptTokenCount":12}}),
+            serde_json::json!({"response":{"error":{"message":"failed"},"usageMetadata":{"promptTokenCount":12}}}),
+        ] {
+            let holder = UpstreamRequestBodyHolder::default();
+            holder.capture_usage(&raw);
+            assert!(holder.stream_failure().is_some());
+            holder.begin_generation_attempt();
+            assert!(holder.stream_failure().is_none());
+            holder.capture_additive_usage(&raw);
+            assert!(holder.stream_failure().is_some());
+        }
     }
 }
 
