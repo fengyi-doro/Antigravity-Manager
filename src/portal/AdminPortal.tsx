@@ -1,71 +1,61 @@
+import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Users, RefreshCw, Wallet as WalletIcon, ArrowUpRight, X, CheckCircle2, UserX, ReceiptText } from 'lucide-react';
 import WalletHistory, { type WalletHistoryData } from './WalletHistory';
-import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { billingState, money, type Wallet } from "./billing";
-
+import PortalDialog from './PortalDialog';
+import { billingState, money, type Wallet } from './billing';
+import { panel, primaryButton, secondaryButton, tableButton, table, input } from './styles';
 type User = { id: string; email: string; enabled: boolean; created_at: number };
-type Summary = { users: User[] };
 type Detail = { history: WalletHistoryData; key: { id: string; enabled: boolean; total_requests: number; total_tokens_used: number } | null; wallet: Wallet };
-async function adminApi<T>(path: string, method = "GET", body?: unknown): Promise<T> {
-  const response = await fetch(`/api/portal${path}`, {
-    method, cache: "no-store",
-    headers: { Authorization: `Bearer ${sessionStorage.getItem("abv_admin_api_key") || ""}`, ...(body ? { "Content-Type": "application/json" } : {}) },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result.error?.message || "管理操作失败"); }
+type Selection = { id: string; email: string; data: Detail };
+type Dialog = { kind: 'credit'; user: User } | { kind: 'review'; row: Wallet['usage'][number] } | { kind: 'status'; user: User };
+async function adminApi<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+  const response = await fetch(`/api/portal${path}`, { method, cache: 'no-store', headers: { Authorization: `Bearer ${sessionStorage.getItem('abv_admin_api_key') || ''}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+  if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result.error?.message || '管理操作失败'); }
   return response.status === 204 ? undefined as T : response.json();
 }
 export default function AdminPortal() {
-  const [summary, setSummary] = useState<Summary>({ users: [] });
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [detail, setDetail] = useState<{ id: string; email: string; data: Detail } | null>(null);
-  const reload = useCallback(async () => { setSummary(await adminApi<Summary>("/users")); }, []);
-  useEffect(() => { reload().catch((e) => setError(e.message)); }, [reload]);
-  async function act(action: () => Promise<void>) {
-    setBusy(true); setError("");
-    try { await action(); await reload(); } catch (e) { setError(e instanceof Error ? e.message : "操作失败"); } finally { setBusy(false); }
+  const [users, setUsers] = useState<User[]>([]), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const [detail, setDetail] = useState<Selection | null>(null), [tab, setTab] = useState<'usage' | 'history'>('usage');
+  const [dialog, setDialog] = useState<Dialog | null>(null), [formError, setFormError] = useState('');
+  const [amount, setAmount] = useState(''), [reference, setReference] = useState('');
+  const [status, setStatus] = useState('502'), [total, setTotal] = useState('0'), [cached, setCached] = useState('0'), [output, setOutput] = useState('0');
+  const reload = useCallback(async () => { setUsers((await adminApi<{ users: User[] }>('/users')).users); }, []);
+  async function loadDetail(user: { id: string; email: string }) { setDetail({ ...user, data: await adminApi<Detail>(`/users/${user.id}`) }); }
+  useEffect(() => { setBusy(true); reload().catch(e => setError(e.message)).finally(() => setBusy(false)); }, [reload]);
+  async function act(action: () => Promise<void>) { setBusy(true); setError(''); try { await action(); } catch (e) { setError(e instanceof Error ? e.message : '操作失败'); } finally { setBusy(false); } }
+  function open(value: Dialog) { setDialog(value); setFormError(''); setAmount(''); setReference(''); setStatus('502'); setTotal('0'); setCached('0'); setOutput('0'); }
+  async function submit() {
+    if (!dialog || busy) return;
+    setFormError('');
+    if (dialog.kind === 'credit' && (!/^\d{1,7}(\.\d{1,2})?$/.test(amount) || Number(amount) <= 0 || Number(amount) > 1000000 || !reference.trim() || reference.trim().length > 128)) { setFormError('金额需为 0.01–1,000,000 元，最多两位小数，并填写实际流水号。'); return; }
+    const values = [status, total, cached, output].map(Number);
+    if (dialog.kind === 'review' && (values.some((v, i) => ![status, total, cached, output][i].trim() || !Number.isSafeInteger(v) || v < 0) || values[0] < 200 || values[0] > 599 || values[2] > values[1] || values.slice(1).some(v => v > 4294967295))) { setFormError('请填写有效 HTTP 状态及用量，缓存不得超过总输入。'); return; }
+    setBusy(true);
+    try {
+      if (dialog.kind === 'credit') { await adminApi(`/users/${dialog.user.id}/credits`, 'POST', { amount_cents: Math.round(Number(amount) * 100), reference: reference.trim() }); await loadDetail(dialog.user); }
+      if (dialog.kind === 'review' && detail) { await adminApi(`/requests/${dialog.row.id}/settle`, 'POST', { status: values[0], input_tokens: values[1], cached_tokens: values[2], output_tokens: values[3] }); await loadDetail(detail); }
+      if (dialog.kind === 'status') { await adminApi(`/users/${dialog.user.id}`, 'PATCH', { enabled: !dialog.user.enabled }); if (detail?.id === dialog.user.id) await loadDetail(dialog.user); }
+      await reload(); setDialog(null);
+    } catch (e) { setFormError(e instanceof Error ? e.message : '操作失败'); } finally { setBusy(false); }
   }
-  return <div className="flex-1 min-w-0 overflow-auto p-6 space-y-6">
-    <div className="flex justify-between items-center"><div><h1 className="text-2xl font-semibold">注册用户</h1>
-      <p className="text-sm opacity-60 mt-1">管理账户状态、余额和充值。密钥的到期时间、IP 和访问时段在用户 Token 页面管理。</p></div>
-      <button className="btn btn-sm" disabled={busy} onClick={() => act(async () => {})}>刷新</button></div>
-    <Link className="btn btn-sm" to="/user-token">管理用户 Token</Link>
-    {error && <p role="alert" className="text-error">{error}</p>}
-    {detail && <div className="p-4 rounded-xl bg-base-200">
-      {detail.email}：{detail.data.key ? <>累计请求 {detail.data.key.total_requests.toLocaleString()} · 用量 {detail.data.key.total_tokens_used.toLocaleString()} token · {detail.data.key.enabled ? "密钥正常" : "密钥已停用"}</> : "尚无密钥"}
-      {detail.data.wallet.enabled && <p className="mt-2">余额 {money(detail.data.wallet.balance_nano)} · 累计消费 {money(detail.data.wallet.spent_nano)}</p>}
-      <button className="btn btn-xs ml-3" onClick={() => setDetail(null)}>关闭</button>
-      <WalletHistory history={detail.data.history} busy={busy} action={(id, action, payment_reference) => { void act(async () => { await adminApi(`/refunds/${id}`, "POST", { action, payment_reference }); setDetail({ ...detail, data: await adminApi<Detail>(`/users/${detail.id}`) }); }); }} />
-      {detail.data.wallet.review_count > 0 && <p className="text-warning mt-2">{detail.data.wallet.review_count} 笔费用待核对；仅根据上游记录核对用量，缺少证据时可按失败释放。</p>}
-      <div className="overflow-auto mt-3"><table className="table table-xs"><thead><tr><th>请求 / 模型</th><th>普通输入 / 缓存 / 输出</th><th>状态 / 费用</th><th>操作</th></tr></thead>
-        <tbody>{detail.data.wallet.usage.map(row => <tr key={row.id}><td><code>{row.id}</code><div>{row.model}</div></td><td>{row.uncached_tokens ?? "—"} / {row.cached_tokens ?? "—"} / {row.output_tokens ?? "—"}
-          {row.breakdown && <div>{money(row.breakdown.input_nano)} + {money(row.breakdown.cached_nano)} + {money(row.breakdown.output_nano)}</div>}</td>
-          <td>{billingState[row.state] || row.state}{row.status != null && ` · HTTP ${row.status}`}<div>{row.charged_nano == null ? "—" : money(row.charged_nano)}</div></td>
-          <td>{row.state === "review" && <button className="btn btn-xs" disabled={busy} onClick={() => {
-            const raw = window.prompt("填写已核实的 HTTP 状态、总输入（含缓存）、缓存、输出 token，使用逗号分隔；如确认失败未收费，填写 502,0,0,0");
-            if (raw == null) return;
-            const values = raw.split(",").map(v => Number(v.trim()));
-            if (values.length !== 4 || values.some(v => !Number.isSafeInteger(v) || v < 0) || values[0] < 200 || values[0] > 599 || values[2] > values[1] || values.slice(1).some(v => v > 4294967295)) { setError("状态或用量格式不正确"); return; }
-            if (!window.confirm(`确认核对请求 ${row.id}？成功状态将按所填用量扣费。`)) return;
-            void act(async () => { await adminApi(`/requests/${row.id}/settle`, "POST", { status: values[0], input_tokens: values[1], cached_tokens: values[2], output_tokens: values[3] }); setDetail({ ...detail, data: await adminApi<Detail>(`/users/${detail.id}`) }); });
-          }}>核对结算</button>}</td></tr>)}</tbody></table></div>
-    </div>}
-    <div className="overflow-auto"><table className="table"><thead><tr><th>邮箱</th><th>状态</th><th>注册时间（北京时间）</th><th>操作</th></tr></thead>
-      <tbody>{summary.users.map((user) => <tr key={user.id}><td>{user.email}</td><td>{user.enabled ? "正常" : "已停用"}</td>
-        <td>{new Date(user.created_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}</td><td className="space-x-2">
-          <button className="btn btn-xs" disabled={busy} onClick={() => act(async () => { setDetail({ id: user.id, email: user.email, data: await adminApi<Detail>(`/users/${user.id}`) }); })}>余额 / 用量</button>
-          <button className="btn btn-xs" disabled={busy} onClick={() => {
-            const amount = window.prompt(`为 ${user.email} 充值（元）`);
-            if (amount == null) return;
-            if (!/^\d{1,7}(\.\d{1,2})?$/.test(amount) || Number(amount) <= 0 || Number(amount) > 1000000) { setError("请输入 0.01–1,000,000 元，最多两位小数"); return; }
-            const reference = window.prompt("填写本次实际充值流水号（重试时使用同一流水号，避免重复充值）");
-            if (!reference?.trim() || reference.length > 128) return;
-            void act(async () => { await adminApi(`/users/${user.id}/credits`, "POST", { amount_cents: Math.round(Number(amount) * 100), reference }); setDetail({ id: user.id, email: user.email, data: await adminApi<Detail>(`/users/${user.id}`) }); });
-          }}>充值</button>
-          <button className="btn btn-xs" disabled={busy} onClick={() => act(async () => { await adminApi(`/users/${user.id}`, "PATCH", { enabled: !user.enabled }); setDetail(null); })}>{user.enabled ? "停用账号" : "启用账号"}</button>
-        </td></tr>)}</tbody></table>
-      {!summary.users.length && <p className="text-center opacity-60 p-8">暂无注册用户</p>}
-    </div>
-  </div>;
+  const active = users.filter(u => u.enabled).length;
+  return <div className="h-full overflow-y-auto"><div className="p-5 space-y-5 max-w-7xl mx-auto w-full">
+    <header className="flex flex-wrap items-center justify-between gap-4"><div><h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2"><span className="p-2 bg-purple-50 dark:bg-purple-900/20 rounded-lg"><Users className="w-5 h-5 text-purple-500" /></span>注册用户</h1><p className="text-xs text-gray-500 dark:text-gray-400 mt-2">管理账户、余额与充值退款；密钥访问限制在用户 Token 中设置。</p></div><div className="flex items-center gap-2"><button title="刷新" aria-label="刷新用户" className={secondaryButton} disabled={busy} onClick={() => void act(async () => { await reload(); if (detail) await loadDetail(detail); })}><RefreshCw size={16} className={busy ? 'animate-spin' : ''} /></button><Link className={`${primaryButton} flex items-center gap-2`} to="/user-token">管理用户 Token<ArrowUpRight size={15} /></Link></div></header>
+    {error && <div role="alert" className="rounded-xl border border-red-100 dark:border-red-900/40 bg-red-50 dark:bg-red-900/20 px-4 py-3 text-sm text-red-600 dark:text-red-400">{error}</div>}
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">{[{ label: '注册用户', value: users.length, icon: Users, color: 'text-purple-500 bg-purple-50 dark:bg-purple-900/20' }, { label: '已启用', value: active, icon: CheckCircle2, color: 'text-green-500 bg-green-50 dark:bg-green-900/20' }, { label: '已停用', value: users.length - active, icon: UserX, color: 'text-gray-500 bg-gray-100 dark:bg-base-200' }].map(s => <div key={s.label} className={`${panel} p-4`}><span className={`inline-flex p-1.5 rounded-md ${s.color}`}><s.icon size={16} /></span><div className="text-2xl font-bold text-gray-900 dark:text-base-content mt-2">{s.value}</div><div className="text-xs text-gray-500 dark:text-gray-400 mt-1">{s.label}</div></div>)}</div>
+    <section className={`${panel} overflow-hidden`}><div className="overflow-x-auto"><table className={table}><thead className="bg-gray-50/80 dark:bg-base-200/50"><tr><th>邮箱</th><th>账户状态</th><th>注册时间（北京时间）</th><th className="text-right">操作</th></tr></thead><tbody className="divide-y divide-gray-100 dark:divide-base-200">{users.map(user => <tr key={user.id} className="hover:bg-gray-50/80 dark:hover:bg-base-200/40"><td><div className="flex items-center gap-3"><span className="w-8 h-8 shrink-0 rounded-full bg-purple-50 dark:bg-purple-900/20 text-purple-500 flex items-center justify-center font-semibold">{user.email[0]?.toUpperCase()}</span><span className="font-medium break-all">{user.email}</span></div></td><td><span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${user.enabled ? 'bg-green-50 text-green-600 dark:bg-green-900/20 dark:text-green-400' : 'bg-gray-100 text-gray-500 dark:bg-base-200 dark:text-gray-400'}`}>{user.enabled ? '正常' : '已停用'}</span></td><td className="text-xs whitespace-nowrap">{new Date(user.created_at * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}</td><td><div className="flex justify-end gap-2 whitespace-nowrap"><button className={tableButton} disabled={busy} onClick={() => void act(async () => { setTab('usage'); await loadDetail(user); })}>余额 / 用量</button><button className={tableButton} disabled={busy} onClick={() => open({ kind: 'credit', user })}>充值</button><button className={secondaryButton} disabled={busy} onClick={() => open({ kind: 'status', user })}>{user.enabled ? '停用' : '启用'}</button></div></td></tr>)}{!users.length && <tr><td colSpan={4} className="text-center py-12 text-gray-400">{busy ? '正在加载…' : '暂无注册用户'}</td></tr>}</tbody></table></div></section>
+    {detail && <section className={`${panel} overflow-hidden`}><header className="p-5 flex items-center justify-between gap-3 border-b border-gray-100 dark:border-base-200"><div className="min-w-0"><h2 className="text-base font-semibold text-gray-900 dark:text-base-content break-all">{detail.email}</h2><p className="text-xs text-gray-500 mt-1">{detail.data.key ? `累计请求 ${detail.data.key.total_requests.toLocaleString()} · ${detail.data.key.enabled ? '密钥正常' : '密钥已停用'}` : '尚无密钥'}</p></div><button aria-label="关闭用户明细" disabled={busy} className={secondaryButton} onClick={() => setDetail(null)}><X size={16} /></button></header><div className="p-5 space-y-5">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">{[{ title: '账户余额', value: money(detail.data.wallet.balance_nano), icon: WalletIcon }, { title: '累计消费', value: money(detail.data.wallet.spent_nano), icon: ReceiptText }].map(s => <div key={s.title} className="rounded-xl bg-gray-50 dark:bg-base-200 p-4"><div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400"><s.icon size={15} />{s.title}</div><strong className="block text-2xl font-semibold text-gray-900 dark:text-base-content mt-2 tabular-nums">{s.value}</strong></div>)}</div>
+      <div role="tablist" aria-label="用户账户明细" className="inline-flex gap-1 p-1 rounded-full bg-gray-100 dark:bg-base-200">{(['usage', 'history'] as const).map(t => <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`px-4 py-1.5 rounded-full text-xs font-medium transition-colors ${tab === t ? 'bg-white dark:bg-base-100 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-gray-500 dark:text-gray-400'}`}>{t === 'usage' ? '调用与费用' : '充值与退款'}</button>)}</div>
+      {tab === 'history' ? <WalletHistory admin history={detail.data.history} busy={busy} action={async (id, action, payment_reference) => { await adminApi(`/refunds/${id}`, 'POST', { action, payment_reference }); await loadDetail(detail); await reload(); }} /> : <div className="space-y-4">
+        {detail.data.wallet.review_count > 0 && <p className="rounded-xl bg-amber-50 dark:bg-amber-900/20 px-4 py-3 text-xs text-amber-700 dark:text-amber-400">{detail.data.wallet.review_count} 笔费用待核对。请根据上游记录填写真实用量；确认失败时选择失败状态释放费用。</p>}
+        <div className="overflow-x-auto rounded-xl border border-gray-100 dark:border-base-200"><table className={table}><thead className="bg-gray-50/80 dark:bg-base-200/50"><tr><th>请求 / 模型</th><th>普通输入 / 缓存 / 输出</th><th>状态 / 费用</th><th>操作</th></tr></thead><tbody className="divide-y divide-gray-100 dark:divide-base-200">{detail.data.wallet.usage.map(row => <tr key={row.id}><td className="text-xs"><code className="break-all">{row.id}</code><div className="text-gray-400 mt-1">{row.model}</div></td><td className="text-xs tabular-nums"><div>{row.uncached_tokens ?? '—'} / {row.cached_tokens ?? '—'} / {row.output_tokens ?? '—'}</div>{row.breakdown && <div className="text-gray-400 mt-1">{money(row.breakdown.input_nano)} + {money(row.breakdown.cached_nano)} + {money(row.breakdown.output_nano)}</div>}</td><td className="text-xs"><span className={row.state === 'review' ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500 dark:text-gray-400'}>{billingState[row.state] || row.state}{row.status != null && ` · HTTP ${row.status}`}</span><div className="font-medium mt-1 tabular-nums">{row.charged_nano == null ? '—' : money(row.charged_nano)}</div></td><td>{row.state === 'review' && <button className={tableButton} disabled={busy} onClick={() => open({ kind: 'review', row })}>核对结算</button>}</td></tr>)}{!detail.data.wallet.usage.length && <tr><td colSpan={4} className="py-8 text-center text-gray-400">暂无调用记录</td></tr>}</tbody></table></div>
+      </div>}
+    </div></section>}
+    {dialog && <PortalDialog admin title={dialog.kind === 'credit' ? '人工充值' : dialog.kind === 'review' ? '核对请求费用' : dialog.user.enabled ? '停用账户' : '启用账户'} busy={busy} confirmText={dialog.kind === 'credit' ? '确认入账' : dialog.kind === 'review' ? '确认结算' : '确认'} cancel={() => setDialog(null)} confirm={() => void submit()}><div className="space-y-4 text-sm text-gray-700 dark:text-gray-300">
+      {dialog.kind === 'credit' ? <><p className="break-all text-gray-500">{dialog.user.email}</p><label className="block space-y-2"><span>充值金额（元）</span><input autoFocus className={input} inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} /></label><label className="block space-y-2"><span>实际充值流水号</span><input className={input} maxLength={128} value={reference} onChange={e => setReference(e.target.value)} /></label><p className="text-xs text-gray-500">同一笔充值重试请使用原流水号，避免重复入账。</p></> : dialog.kind === 'review' ? <><code className="text-xs break-all">{dialog.row.id}</code><p className="text-xs text-gray-500">成功状态按所填用量扣费。确认失败未收费时，填写 502 和零用量。</p><div className="grid grid-cols-2 gap-3">{[{ label: 'HTTP 状态', value: status, set: setStatus }, { label: '总输入（含缓存）', value: total, set: setTotal }, { label: '缓存输入', value: cached, set: setCached }, { label: '输出', value: output, set: setOutput }].map(f => <label key={f.label} className="block space-y-2"><span className="text-xs">{f.label}</span><input className={input} inputMode="numeric" value={f.value} onChange={e => f.set(e.target.value)} /></label>)}</div></> : <p className="break-all">确认{dialog.user.enabled ? '停用' : '启用'} {dialog.user.email}？{dialog.user.enabled && '停用后该账户将无法继续使用服务。'}</p>}
+      {formError && <p role="alert" className="text-sm text-red-500">{formError}</p>}
+    </div></PortalDialog>}
+  </div></div>;
 }

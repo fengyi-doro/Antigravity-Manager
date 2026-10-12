@@ -167,7 +167,7 @@ export default function Portal() {
               <div><strong>输入 {number(row.input_tokens ?? 0)} · 输出 {number(row.output_tokens ?? 0)}</strong><small>HTTP {row.status}</small></div>
             </div>) : <p className="portal-empty">还没有调用记录</p>}</div>}
           </section>
-          <WalletHistory history={snapshot.data.history} busy={busy} request={(credit_reference, amount_cents, reason) => { void perform(async () => { await api("/refunds", "POST", { credit_reference, amount_cents, reason }, snapshot.csrf); await reload(); setNotice("退款申请已提交，等待管理员审核。"); }); }} />
+          <WalletHistory history={snapshot.data.history} busy={busy} request={async (credit_reference, amount_cents, reason) => { await api("/refunds", "POST", { credit_reference, amount_cents, reason }, snapshot.csrf); await reload(); setNotice("退款申请已提交，等待管理员审核。"); }} />
           {legacy && (legacy.paid_available > 0 || legacy.orders.length > 0 || legacy.usage.length > 0) && (
             <details className="portal-section"><summary>历史账户记录</summary>
               <p className="portal-muted">独立充值与扣费已停用。以下记录仅供查看，不参与当前 API 用量统计。</p>
