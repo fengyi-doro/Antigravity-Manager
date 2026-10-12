@@ -37,6 +37,8 @@ pub struct ProxyRequestLog {
     pub username: Option<String>, // User token username
     #[serde(default)]
     pub session_id: Option<String>, // 会话标识 (如 sess-xxx)
+    #[serde(default)]
+    pub diagnostics: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -162,6 +164,7 @@ impl ProxyRequestLog {
             protocol: self.protocol.clone(),
             username: self.username.clone(),
             session_id: self.session_id.clone(),
+            diagnostics: None,
         }
     }
 }
@@ -173,6 +176,8 @@ pub(crate) struct UpstreamCapture {
     billing_id: Option<String>,
     usage: Option<crate::proxy::pipeline::CanonicalUsage>,
     previous_usage: crate::proxy::pipeline::CanonicalUsage,
+    attempts: Vec<crate::proxy::diagnostics::UpstreamAttempt>,
+    total_attempts: u32,
 }
 
 #[derive(Clone, Default)]
@@ -183,6 +188,33 @@ tokio::task_local! {
 }
 
 impl UpstreamRequestBodyHolder {
+    pub fn billing_id(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|lock| lock.billing_id.clone())
+    }
+
+    pub fn record_attempt(&self, mut attempt: crate::proxy::diagnostics::UpstreamAttempt) {
+        if let Ok(mut lock) = self.0.lock() {
+            lock.total_attempts = lock.total_attempts.saturating_add(1);
+            attempt.sequence = lock.total_attempts;
+            if lock.attempts.len() < 32 {
+                lock.attempts.push(attempt);
+            }
+        }
+    }
+
+    pub fn diagnostics(&self, status: u16, error: Option<&str>) -> serde_json::Value {
+        self.0
+            .lock()
+            .ok()
+            .map(|lock| {
+                serde_json::json!({
+                    "attempts":lock.attempts,"total_attempts":lock.total_attempts,
+                    "truncated":lock.total_attempts > 32,
+                    "error_class":crate::proxy::diagnostics::error_class(status,error.unwrap_or(""))
+                })
+            })
+            .unwrap_or_else(|| serde_json::json!({"error_class":"diagnostics_unavailable"}))
+    }
     /// Preserve usage when the pipeline starts a separate auto-heal generation.
     pub fn next_usage_call(&self) {
         if let Ok(mut lock) = self.0.lock() {

@@ -13,6 +13,7 @@ const server = createServer(async (request, response) => {
     let body = '';
     for await (const chunk of request) body += chunk;
     calls.push({ url: request.url, headers: request.headers, body });
+    response.setHeader('X-Request-ID', 'bill-fixture-trace');
     response.setHeader('X-Mapped-Model', 'selected-account-medium');
     response.setHeader('X-Account-Email', 'fixture@example.invalid');
     if (request.url.endsWith('/models')) {

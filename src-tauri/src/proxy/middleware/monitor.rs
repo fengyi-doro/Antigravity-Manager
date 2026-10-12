@@ -294,10 +294,11 @@ fn summarize_image_json_response(json: &Value) -> Option<String> {
 /// Helper function to record User Token usage
 fn record_user_token_usage(
     user_token_identity: &Option<UserTokenIdentity>,
-    log: &ProxyRequestLog,
+    log: &mut ProxyRequestLog,
     user_agent: Option<String>,
     upstream_holder: &UpstreamRequestBodyHolder,
 ) {
+    log.diagnostics = Some(upstream_holder.diagnostics(log.status, log.error.as_deref()));
     upstream_holder.settle_billing(log.status);
     if let Some(identity) = user_token_identity {
         let _ = crate::modules::user_token_db::record_token_usage_and_ip(
@@ -875,9 +876,15 @@ pub async fn monitor_middleware(
     let mut request = request;
     request.extensions_mut().insert(upstream_holder.clone());
 
-    let response = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
+    let request_id = upstream_holder
+        .billing_id()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut response = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
         .scope(upstream_holder.clone(), next.run(request))
         .await;
+    if let Ok(id) = axum::http::HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert("x-request-id", id);
+    }
     let upstream_request_body = upstream_holder.take();
     let upstream_request_headers = upstream_holder.take_headers();
     let response_headers_json =
@@ -949,7 +956,7 @@ pub async fn monitor_middleware(
 
     let monitor = state.monitor.clone();
     let mut log = ProxyRequestLog {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: request_id,
         timestamp: chrono::Utc::now().timestamp_millis(),
         method,
         url: uri,
@@ -972,6 +979,7 @@ pub async fn monitor_middleware(
         protocol,
         username,
         session_id,
+        diagnostics: None,
     };
 
     if content_type.contains("text/event-stream") {
@@ -1597,7 +1605,7 @@ pub async fn monitor_middleware(
             // Record User Token Usage
             record_user_token_usage(
                 &user_token_identity,
-                &log,
+                &mut log,
                 user_agent.clone(),
                 &upstream_holder,
             );
@@ -1698,7 +1706,7 @@ pub async fn monitor_middleware(
                 // Record User Token Usage
                 record_user_token_usage(
                     &user_token_identity,
-                    &log,
+                    &mut log,
                     user_agent.clone(),
                     &upstream_holder,
                 );
@@ -1712,7 +1720,7 @@ pub async fn monitor_middleware(
                 // Record User Token Usage (even if too large)
                 record_user_token_usage(
                     &user_token_identity,
-                    &log,
+                    &mut log,
                     user_agent.clone(),
                     &upstream_holder,
                 );
@@ -1725,7 +1733,7 @@ pub async fn monitor_middleware(
         log.response_body = Some(format!("[{}]", content_type));
 
         // Record User Token Usage
-        record_user_token_usage(&user_token_identity, &log, user_agent, &upstream_holder);
+        record_user_token_usage(&user_token_identity, &mut log, user_agent, &upstream_holder);
 
         monitor.log_request(log).await;
         response
