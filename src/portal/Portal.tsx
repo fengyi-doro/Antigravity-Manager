@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import "./portal.css";
+import { billingState, money, type Wallet } from "./billing";
 
 type Usage = { id: string; model: string; input_tokens: number | null; output_tokens: number | null; request_time: number; status: number };
 type NativeToken = { id: string; suffix: string; enabled: boolean; expires_at: number | null; total_requests: number; total_tokens_used: number; last_used_at: number | null; usage: Usage[] };
 type Legacy = { paid_available: number; usage: { id: string; model: string; charged: number | null; created_at: number }[]; orders: { id: string; amount_cents: number; state: string; created_at: number }[] };
-type Wallet = { enabled: boolean; balance_nano: number; spent_nano: number; usage: { id: string; model: string; input_tokens: number | null; cached_tokens: number | null; output_tokens: number | null; charged_nano: number | null; status: number | null; state: string; created_at: number }[] };
 type Snapshot = { user: { email: string }; csrf: string; data: { key: NativeToken | null; legacy: Legacy; wallet: Wallet } };
 type Config = { registration_open: boolean; api_base_url: string };
 const number = (value: number) => new Intl.NumberFormat("zh-CN").format(value);
-const money = (nano: number) => new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", minimumFractionDigits: 2, maximumFractionDigits: 8 }).format(nano / 1_000_000_000);
 const date = (value: number) => new Date(value * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
 const orderStatus: Record<string, string> = { pending: "待支付", paid: "已到账", closed: "已关闭" };
 
@@ -150,9 +149,14 @@ export default function Portal() {
             <p className="portal-muted">在兼容客户端填写接口地址和 API Key。可用模型通过模型列表接口查询。</p>
           </section>
           <section className="portal-section"><h2>调用记录</h2>
+            {Boolean(wallet?.review_count) && <p role="status" className="portal-alert">有 {wallet?.review_count} 笔调用费用待核对，请联系管理员并提供下方请求编号。核对完成前暂停新的计费调用。</p>}
             {wallet?.enabled ? <div className="portal-records">{wallet.usage.length ? wallet.usage.map((row) => <div className="portal-record" key={row.id}>
-              <div><strong>{row.model}</strong><small>{date(row.created_at)}</small></div>
-              <div><strong>输入 {number(row.input_tokens ?? 0)} · 缓存 {number(row.cached_tokens ?? 0)} · 输出 {number(row.output_tokens ?? 0)}</strong><small>{row.state === "settled" ? `费用 ${money(row.charged_nano ?? 0)}` : row.state === "released" ? "未收费" : row.state === "review" ? "费用待核对" : "调用中"}{row.status != null ? ` · HTTP ${row.status}` : ""}</small></div>
+              <div><strong>{row.model}</strong><small>{date(row.created_at)}</small><small>请求编号 <code>{row.id}</code></small></div>
+              <div><strong>普通输入 {row.uncached_tokens == null ? "—" : number(row.uncached_tokens)} · 缓存 {row.cached_tokens == null ? "—" : number(row.cached_tokens)} · 输出 {row.output_tokens == null ? "—" : number(row.output_tokens)}</strong>
+                <small>{billingState[row.state] || row.state}{row.charged_nano != null ? ` · ${money(row.charged_nano)}` : ""}{row.status != null ? ` · HTTP ${row.status}` : ""}</small>
+                {row.breakdown && <small>普通输入 {money(row.breakdown.input_nano)} + 缓存 {money(row.breakdown.cached_nano)} + 输出 {money(row.breakdown.output_nano)}</small>}
+                {row.settled_at != null && <small>结算于 {date(row.settled_at)}</small>}
+              </div>
             </div>) : <p className="portal-empty">还没有调用记录</p>}</div> : <div className="portal-records">{key?.usage.length ? key.usage.map((row) => <div className="portal-record" key={row.id}>
               <div><strong>{row.model || "unknown"}</strong><small>{date(row.request_time)}</small></div>
               <div><strong>输入 {number(row.input_tokens ?? 0)} · 输出 {number(row.output_tokens ?? 0)}</strong><small>HTTP {row.status}</small></div>

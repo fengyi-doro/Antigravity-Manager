@@ -19,14 +19,14 @@ const MAX_LOGGED_FIELD_CHARS: usize = 500;
 async fn next_chunk_while_receiver_open<S, T>(
     stream: &mut S,
     tx: &tokio::sync::mpsc::Sender<T>,
-) -> Option<S::Item>
+) -> Result<Option<S::Item>, ()>
 where
     S: Stream + Unpin,
 {
     tokio::select! {
         biased;
-        _ = tx.closed() => None,
-        chunk = stream.next() => chunk,
+        _ = tx.closed() => Err(()),
+        chunk = stream.next() => Ok(chunk),
     }
 }
 
@@ -985,7 +985,16 @@ pub async fn monitor_middleware(
             let mut all_stream_data = Vec::new();
             let mut last_few_bytes = Vec::new();
 
-            while let Some(chunk_res) = next_chunk_while_receiver_open(&mut stream, &tx).await {
+            loop {
+                let chunk_res = match next_chunk_while_receiver_open(&mut stream, &tx).await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(()) => {
+                        log.status = 499;
+                        log.error = Some("Client disconnected before stream completion".into());
+                        break;
+                    }
+                };
                 if let Ok(chunk) = chunk_res {
                     all_stream_data.extend_from_slice(&chunk);
 
@@ -998,12 +1007,15 @@ pub async fn monitor_middleware(
                         }
                     }
                     if tx.send(Ok::<_, axum::Error>(chunk)).await.is_err() {
+                        log.status = 499;
+                        log.error = Some("Client disconnected before stream completion".into());
                         break;
                     }
                 } else if let Err(e) = chunk_res {
-                    if tx.send(Err(axum::Error::new(e))).await.is_err() {
-                        break;
-                    }
+                    log.status = 502;
+                    log.error = Some("Upstream response stream interrupted".into());
+                    let _ = tx.send(Err(axum::Error::new(e))).await;
+                    break;
                 }
             }
             drop(stream);
@@ -1047,6 +1059,15 @@ pub async fn monitor_middleware(
                     }
 
                     if let Ok(json) = serde_json::from_str::<Value>(json_str) {
+                        if json.get("error").is_some()
+                            || json.get("type").and_then(Value::as_str) == Some("response.failed")
+                        {
+                            if (200..300).contains(&log.status) {
+                                log.status = 502;
+                            }
+                            log.error =
+                                Some("Upstream reported an error in the response stream".into());
+                        }
                         // OpenAI format: choices[0].delta.content / reasoning_content / tool_calls
                         if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
                             for choice in choices {
@@ -1552,7 +1573,7 @@ pub async fn monitor_middleware(
                 }
             }
 
-            if log.status >= 400 {
+            if log.status >= 400 && log.error.is_none() {
                 log.error = Some("Stream Error or Failed".to_string());
             }
 
@@ -1748,7 +1769,7 @@ mod tests {
 
             assert!(next_chunk_while_receiver_open(&mut source, &tx)
                 .await
-                .is_none());
+                .is_err());
         });
 
         polled_rx.await.expect("source stream was not polled");
@@ -1758,6 +1779,16 @@ mod tests {
             .expect("forwarder did not stop after receiver closed")
             .expect("forwarder task panicked");
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn normal_stream_end_is_distinct_from_client_cancellation() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(1);
+        let mut source = stream::empty::<()>();
+        assert!(matches!(
+            next_chunk_while_receiver_open(&mut source, &tx).await,
+            Ok(None)
+        ));
     }
 
     #[test]

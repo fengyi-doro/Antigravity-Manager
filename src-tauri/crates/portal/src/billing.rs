@@ -107,6 +107,9 @@ impl Store {
         status: u16,
         usage: Option<(u32, u32, u32)>,
     ) -> Result<()> {
+        if !(200..=599).contains(&status) {
+            return Err(Error::Invalid("无效的结算状态".into()));
+        }
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (user, state): (String, String) = tx.query_row(
@@ -162,10 +165,39 @@ impl Store {
             [user],
             |r| r.get(0),
         )?;
-        let mut stmt=conn.prepare("SELECT id,model,input_tokens,cached_tokens,output_tokens,charged_nano,status,state,created_at FROM billing_requests WHERE user_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 30")?;
-        let usage=stmt.query_map([user],|r|Ok(json!({"id":r.get::<_,String>(0)?,"model":r.get::<_,String>(1)?,"input_tokens":r.get::<_,Option<i64>>(2)?,"cached_tokens":r.get::<_,Option<i64>>(3)?,"output_tokens":r.get::<_,Option<i64>>(4)?,"charged_nano":r.get::<_,Option<i64>>(5)?,"status":r.get::<_,Option<u16>>(6)?,"state":r.get::<_,String>(7)?,"created_at":r.get::<_,i64>(8)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let review_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM billing_requests WHERE user_id=?1 AND state='review'",
+            [user],
+            |r| r.get(0),
+        )?;
+        let mut stmt=conn.prepare("SELECT id,model,input_tokens,cached_tokens,output_tokens,charged_nano,status,state,created_at,settled_at FROM billing_requests WHERE user_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 50")?;
+        let usage = stmt
+            .query_map([user], |r| {
+                let input: Option<i64> = r.get(2)?;
+                let cached: Option<i64> = r.get(3)?;
+                let output: Option<i64> = r.get(4)?;
+                let state: String = r.get(7)?;
+                let breakdown = if state == "settled" {
+                    Some(
+                        json!({"input_nano":(input.unwrap_or(0)-cached.unwrap_or(0))*INPUT_NANO,
+                    "cached_nano":cached.unwrap_or(0)*CACHED_NANO,
+                    "output_nano":output.unwrap_or(0)*OUTPUT_NANO}),
+                    )
+                } else {
+                    None
+                };
+                Ok(
+                    json!({"id":r.get::<_,String>(0)?,"model":r.get::<_,String>(1)?,
+                "input_tokens":input,"cached_tokens":cached,"output_tokens":output,
+                "uncached_tokens":input.map(|i| i-cached.unwrap_or(0)),
+                "charged_nano":r.get::<_,Option<i64>>(5)?,"status":r.get::<_,Option<u16>>(6)?,
+                "state":state,"created_at":r.get::<_,i64>(8)?,
+                "settled_at":r.get::<_,Option<i64>>(9)?,"breakdown":breakdown}),
+                )
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(
-            json!({"enabled":balance.is_some(),"balance_nano":balance.unwrap_or(0),"spent_nano":spent,"pricing":pricing(),"usage":usage}),
+            json!({"enabled":balance.is_some(),"balance_nano":balance.unwrap_or(0),"spent_nano":spent,"pricing":pricing(),"review_count":review_count,"usage":usage}),
         )
     }
 }

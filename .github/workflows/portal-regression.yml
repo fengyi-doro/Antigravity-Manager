@@ -1,0 +1,22 @@
+name: Portal billing regression
+on:
+  push:
+    branches: [beta, main]
+    paths: ['src-tauri/crates/portal/**', 'src-tauri/src/modules/user_token_db.rs', 'src-tauri/src/modules/portal_tokens.rs', 'src-tauri/src/proxy/pipeline/usage.rs', 'src-tauri/src/proxy/middleware/monitor.rs', '.github/workflows/portal-regression.yml']
+  pull_request:
+    branches: [beta, main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portal-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri/crates/portal
+      - name: Native keys, billing, recovery and account isolation
+        run: cargo test --manifest-path src-tauri/crates/portal/Cargo.toml -- --test-threads=1

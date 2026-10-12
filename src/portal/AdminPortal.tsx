@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { billingState, money, type Wallet } from "./billing";
 
 type User = { id: string; email: string; enabled: boolean; created_at: number };
 type Summary = { users: User[] };
-type Detail = { key: { id: string; enabled: boolean; total_requests: number; total_tokens_used: number } | null; wallet: { enabled: boolean; balance_nano: number; spent_nano: number } };
-const money = (nano: number) => new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", maximumFractionDigits: 8 }).format(nano / 1_000_000_000);
+type Detail = { key: { id: string; enabled: boolean; total_requests: number; total_tokens_used: number } | null; wallet: Wallet };
 async function adminApi<T>(path: string, method = "GET", body?: unknown): Promise<T> {
   const response = await fetch(`/api/portal${path}`, {
     method, cache: "no-store",
@@ -18,7 +18,7 @@ export default function AdminPortal() {
   const [summary, setSummary] = useState<Summary>({ users: [] });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [detail, setDetail] = useState<{ email: string; data: Detail } | null>(null);
+  const [detail, setDetail] = useState<{ id: string; email: string; data: Detail } | null>(null);
   const reload = useCallback(async () => { setSummary(await adminApi<Summary>("/users")); }, []);
   useEffect(() => { reload().catch((e) => setError(e.message)); }, [reload]);
   async function act(action: () => Promise<void>) {
@@ -34,17 +34,31 @@ export default function AdminPortal() {
     {detail && <div className="p-4 rounded-xl bg-base-200">
       {detail.email}：{detail.data.key ? <>累计请求 {detail.data.key.total_requests.toLocaleString()} · 用量 {detail.data.key.total_tokens_used.toLocaleString()} token · {detail.data.key.enabled ? "密钥正常" : "密钥已停用"}</> : "尚无密钥"}
       {detail.data.wallet.enabled && <p className="mt-2">余额 {money(detail.data.wallet.balance_nano)} · 累计消费 {money(detail.data.wallet.spent_nano)}</p>}
-      <button className="btn btn-xs ml-3" onClick={() => setDetail(null)}>关闭</button></div>}
+      <button className="btn btn-xs ml-3" onClick={() => setDetail(null)}>关闭</button>
+      {detail.data.wallet.review_count > 0 && <p className="text-warning mt-2">{detail.data.wallet.review_count} 笔费用待核对；仅根据上游记录核对用量，缺少证据时可按失败释放。</p>}
+      <div className="overflow-auto mt-3"><table className="table table-xs"><thead><tr><th>请求 / 模型</th><th>普通输入 / 缓存 / 输出</th><th>状态 / 费用</th><th>操作</th></tr></thead>
+        <tbody>{detail.data.wallet.usage.map(row => <tr key={row.id}><td><code>{row.id}</code><div>{row.model}</div></td><td>{row.uncached_tokens ?? "—"} / {row.cached_tokens ?? "—"} / {row.output_tokens ?? "—"}
+          {row.breakdown && <div>{money(row.breakdown.input_nano)} + {money(row.breakdown.cached_nano)} + {money(row.breakdown.output_nano)}</div>}</td>
+          <td>{billingState[row.state] || row.state}{row.status != null && ` · HTTP ${row.status}`}<div>{row.charged_nano == null ? "—" : money(row.charged_nano)}</div></td>
+          <td>{row.state === "review" && <button className="btn btn-xs" disabled={busy} onClick={() => {
+            const raw = window.prompt("填写已核实的 HTTP 状态、总输入（含缓存）、缓存、输出 token，使用逗号分隔；如确认失败未收费，填写 502,0,0,0");
+            if (raw == null) return;
+            const values = raw.split(",").map(v => Number(v.trim()));
+            if (values.length !== 4 || values.some(v => !Number.isSafeInteger(v) || v < 0) || values[0] < 200 || values[0] > 599 || values[2] > values[1] || values.slice(1).some(v => v > 4294967295)) { setError("状态或用量格式不正确"); return; }
+            if (!window.confirm(`确认核对请求 ${row.id}？成功状态将按所填用量扣费。`)) return;
+            void act(async () => { await adminApi(`/requests/${row.id}/settle`, "POST", { status: values[0], input_tokens: values[1], cached_tokens: values[2], output_tokens: values[3] }); setDetail({ ...detail, data: await adminApi<Detail>(`/users/${detail.id}`) }); });
+          }}>核对结算</button>}</td></tr>)}</tbody></table></div>
+    </div>}
     <div className="overflow-auto"><table className="table"><thead><tr><th>邮箱</th><th>状态</th><th>注册时间（北京时间）</th><th>操作</th></tr></thead>
       <tbody>{summary.users.map((user) => <tr key={user.id}><td>{user.email}</td><td>{user.enabled ? "正常" : "已停用"}</td>
         <td>{new Date(user.created_at * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}</td><td className="space-x-2">
-          <button className="btn btn-xs" disabled={busy} onClick={() => act(async () => { setDetail({ email: user.email, data: await adminApi<Detail>(`/users/${user.id}`) }); })}>余额 / 用量</button>
+          <button className="btn btn-xs" disabled={busy} onClick={() => act(async () => { setDetail({ id: user.id, email: user.email, data: await adminApi<Detail>(`/users/${user.id}`) }); })}>余额 / 用量</button>
           <button className="btn btn-xs" disabled={busy} onClick={() => {
             const amount = window.prompt(`为 ${user.email} 充值（元）`);
             if (amount == null) return;
             if (!/^\d{1,7}(\.\d{1,2})?$/.test(amount) || Number(amount) <= 0 || Number(amount) > 1000000) { setError("请输入 0.01–1,000,000 元，最多两位小数"); return; }
             const reference = crypto.randomUUID();
-            void act(async () => { await adminApi(`/users/${user.id}/credits`, "POST", { amount_cents: Math.round(Number(amount) * 100), reference }); setDetail({ email: user.email, data: await adminApi<Detail>(`/users/${user.id}`) }); });
+            void act(async () => { await adminApi(`/users/${user.id}/credits`, "POST", { amount_cents: Math.round(Number(amount) * 100), reference }); setDetail({ id: user.id, email: user.email, data: await adminApi<Detail>(`/users/${user.id}`) }); });
           }}>充值</button>
           <button className="btn btn-xs" disabled={busy} onClick={() => act(async () => { await adminApi(`/users/${user.id}`, "PATCH", { enabled: !user.enabled }); setDetail(null); })}>{user.enabled ? "停用账号" : "启用账号"}</button>
         </td></tr>)}</tbody></table>
