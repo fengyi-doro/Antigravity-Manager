@@ -1,7 +1,10 @@
 //! User identities linked to the application's original user-token implementation.
+pub mod account_http;
+pub mod account_services;
 pub mod billing;
 pub mod db;
 pub mod http;
+pub mod mail;
 pub mod native;
 
 use axum::{

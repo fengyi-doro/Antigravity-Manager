@@ -38,6 +38,7 @@ const root = `http://127.0.0.1:${server.address().port}`;
 const signal = new AbortController().signal;
 let checks = 0;
 try {
+    assert.equal((await apiTestRequest({ url: root + "/v1/models", key, auth: "bearer", signal })).requestId, "bill-fixture-trace");
     assert.equal(gatewayRoot(`${root}/v1/`), root);
     assert.equal(gatewayRoot(`${root}/prefix/v1beta`), `${root}/prefix`);
     assert.throws(() => gatewayRoot('https://user:secret@example.invalid/v1'));

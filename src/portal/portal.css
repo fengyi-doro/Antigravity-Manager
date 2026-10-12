@@ -506,3 +506,7 @@
     padding: 22px;
   }
 }
+
+.portal-recovery form { display: grid; gap: 14px; margin-top: 18px; max-width: 420px; }
+.portal-recovery label { display: grid; gap: 7px; }
+.portal-recovery input { width: 100%; border: 1px solid #dce5e0; border-radius: 8px; padding: 11px 12px; background: var(--portal-bg, #fff); color: inherit; }

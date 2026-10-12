@@ -61,7 +61,7 @@ impl Store {
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         match version {
             0 => tx.execute_batch(include_str!("schema.sql"))?,
-            1..=4 => (),
+            1..=5 => (),
             _ => return Err(Error::Internal("Unsupported portal schema version".into())),
         }
         if version < 2 {
@@ -72,6 +72,9 @@ impl Store {
         }
         if version < 4 {
             tx.execute_batch(include_str!("billing.sql"))?;
+        }
+        if version < 5 {
+            tx.execute_batch(include_str!("account_services.sql"))?;
         }
         tx.commit()?;
         #[cfg(unix)]

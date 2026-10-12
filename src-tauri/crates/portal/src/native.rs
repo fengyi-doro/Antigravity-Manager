@@ -35,6 +35,9 @@ impl Portal {
     /// Provision only accounts that have never been linked. Administrator deletion
     /// or suspension of a native token must not be undone by visiting the dashboard.
     pub fn ensure_native_token(&self, user: &User) -> Result<Option<NativeToken>> {
+        if self.config.require_email_verification && !self.store.email_verified(&user.id)? {
+            return Ok(None);
+        }
         let _lock = self
             .token_lock
             .lock()
@@ -59,6 +62,9 @@ impl Portal {
     }
 
     pub fn rotate_native_token(&self, user: &User) -> Result<String> {
+        if self.config.require_email_verification && !self.store.email_verified(&user.id)? {
+            return Err(Error::Invalid("请先验证邮箱".into()));
+        }
         let _lock = self
             .token_lock
             .lock()
@@ -107,7 +113,7 @@ impl Portal {
         // Values come directly from the native token counters and usage rows.
         Ok(
             json!({"billing_enabled":true,"key":token,"wallet":self.store.wallet_dashboard(user)?,
-            "legacy":self.store.legacy_dashboard(user)?}),
+            "legacy":self.store.legacy_dashboard(user)?,"history":self.store.wallet_history(user)?}),
         )
     }
 }

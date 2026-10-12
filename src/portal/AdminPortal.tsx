@@ -1,10 +1,11 @@
+import WalletHistory, { type WalletHistoryData } from './WalletHistory';
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { billingState, money, type Wallet } from "./billing";
 
 type User = { id: string; email: string; enabled: boolean; created_at: number };
 type Summary = { users: User[] };
-type Detail = { key: { id: string; enabled: boolean; total_requests: number; total_tokens_used: number } | null; wallet: Wallet };
+type Detail = { history: WalletHistoryData; key: { id: string; enabled: boolean; total_requests: number; total_tokens_used: number } | null; wallet: Wallet };
 async function adminApi<T>(path: string, method = "GET", body?: unknown): Promise<T> {
   const response = await fetch(`/api/portal${path}`, {
     method, cache: "no-store",
@@ -35,6 +36,7 @@ export default function AdminPortal() {
       {detail.email}：{detail.data.key ? <>累计请求 {detail.data.key.total_requests.toLocaleString()} · 用量 {detail.data.key.total_tokens_used.toLocaleString()} token · {detail.data.key.enabled ? "密钥正常" : "密钥已停用"}</> : "尚无密钥"}
       {detail.data.wallet.enabled && <p className="mt-2">余额 {money(detail.data.wallet.balance_nano)} · 累计消费 {money(detail.data.wallet.spent_nano)}</p>}
       <button className="btn btn-xs ml-3" onClick={() => setDetail(null)}>关闭</button>
+      <WalletHistory history={detail.data.history} busy={busy} action={(id, action, payment_reference) => { void act(async () => { await adminApi(`/refunds/${id}`, "POST", { action, payment_reference }); setDetail({ ...detail, data: await adminApi<Detail>(`/users/${detail.id}`) }); }); }} />
       {detail.data.wallet.review_count > 0 && <p className="text-warning mt-2">{detail.data.wallet.review_count} 笔费用待核对；仅根据上游记录核对用量，缺少证据时可按失败释放。</p>}
       <div className="overflow-auto mt-3"><table className="table table-xs"><thead><tr><th>请求 / 模型</th><th>普通输入 / 缓存 / 输出</th><th>状态 / 费用</th><th>操作</th></tr></thead>
         <tbody>{detail.data.wallet.usage.map(row => <tr key={row.id}><td><code>{row.id}</code><div>{row.model}</div></td><td>{row.uncached_tokens ?? "—"} / {row.cached_tokens ?? "—"} / {row.output_tokens ?? "—"}
@@ -57,7 +59,8 @@ export default function AdminPortal() {
             const amount = window.prompt(`为 ${user.email} 充值（元）`);
             if (amount == null) return;
             if (!/^\d{1,7}(\.\d{1,2})?$/.test(amount) || Number(amount) <= 0 || Number(amount) > 1000000) { setError("请输入 0.01–1,000,000 元，最多两位小数"); return; }
-            const reference = crypto.randomUUID();
+            const reference = window.prompt("填写本次实际充值流水号（重试时使用同一流水号，避免重复充值）");
+            if (!reference?.trim() || reference.length > 128) return;
             void act(async () => { await adminApi(`/users/${user.id}/credits`, "POST", { amount_cents: Math.round(Number(amount) * 100), reference }); setDetail({ id: user.id, email: user.email, data: await adminApi<Detail>(`/users/${user.id}`) }); });
           }}>充值</button>
           <button className="btn btn-xs" disabled={busy} onClick={() => act(async () => { await adminApi(`/users/${user.id}`, "PATCH", { enabled: !user.enabled }); setDetail(null); })}>{user.enabled ? "停用账号" : "启用账号"}</button>
