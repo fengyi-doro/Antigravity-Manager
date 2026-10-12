@@ -1058,18 +1058,15 @@ pub async fn monitor_middleware(
                 let mut reasoning_tokens: Option<u32> = None;
 
                 for line in full_response.lines() {
-                    if !line.starts_with("data: ") {
+                    let Some(json_str) = line.strip_prefix("data:").map(str::trim) else {
                         continue;
-                    }
-                    let json_str = line.trim_start_matches("data: ").trim();
+                    };
                     if json_str == "[DONE]" {
                         continue;
                     }
 
                     if let Ok(json) = serde_json::from_str::<Value>(json_str) {
-                        if json.get("error").is_some()
-                            || json.get("type").and_then(Value::as_str) == Some("response.failed")
-                        {
+                        if crate::proxy::diagnostics::response_failed(&json) {
                             if (200..300).contains(&log.status) {
                                 log.status = 502;
                             }
@@ -1638,6 +1635,12 @@ pub async fn monitor_middleware(
             Ok(bytes) => {
                 if let Ok(s) = std::str::from_utf8(&bytes) {
                     if let Ok(json) = serde_json::from_str::<Value>(&s) {
+                        if (200..300).contains(&log.status)
+                            && crate::proxy::diagnostics::response_failed(&json)
+                        {
+                            log.status = 502;
+                            log.error = Some("Response contained a generation failure".into());
+                        }
                         // 支持 OpenAI "usage" 或 Gemini "usageMetadata"
                         if let Some(usage) = json
                             .get("usage")

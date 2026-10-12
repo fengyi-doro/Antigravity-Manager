@@ -1,6 +1,17 @@
 //! Bounded, credential-free request diagnostics shared by all protocol adapters.
 use serde::{Deserialize, Serialize};
 
+pub fn response_failed(value: &serde_json::Value) -> bool {
+    matches!(
+        value.get("type").and_then(|v| v.as_str()),
+        Some("error" | "response.failed")
+    ) || value.get("error").is_some_and(|v| !v.is_null())
+        || value
+            .get("response")
+            .and_then(|v| v.get("error"))
+            .is_some_and(|v| !v.is_null())
+}
+
 pub fn error_class(status: u16, message: &str) -> &'static str {
     let message = message.to_ascii_lowercase();
     if message.contains("validation_required") || message.contains("verify your account") {
@@ -64,6 +75,19 @@ impl UpstreamAttempt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn embedded_failures_are_distinct_from_nullable_success_fields() {
+        assert!(response_failed(
+            &serde_json::json!({"error":{"message":"failed"}})
+        ));
+        assert!(response_failed(
+            &serde_json::json!({"type":"response.failed","response":{"error":{"code":"failed"}}})
+        ));
+        assert!(response_failed(&serde_json::json!({"type":"error"})));
+        assert!(!response_failed(
+            &serde_json::json!({"error":null,"response":{"error":null}})
+        ));
+    }
     #[test]
     fn retries_keep_causes_distinct_and_endpoint_secrets_are_excluded() {
         assert_eq!(error_class(404, ""), "model_or_endpoint");
