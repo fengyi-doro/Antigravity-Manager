@@ -5,6 +5,8 @@ import { useTranslation, Trans } from 'react-i18next';
 import ModalDialog from '../common/ModalDialog';
 import { useState } from 'react';
 import { showToast } from '../common/ToastContainer';
+import { accountHealth } from '../../utils/accountHealth';
+import { useAccountStore } from '../../stores/useAccountStore';
 
 interface AccountErrorDialogProps {
     account: Account | null;
@@ -14,6 +16,7 @@ interface AccountErrorDialogProps {
 export default function AccountErrorDialog({ account, onClose }: AccountErrorDialogProps) {
     const [showRaw, setShowRaw] = useState(false);
     const [showGuide, setShowGuide] = useState(false);
+    const [refreshing, setRefreshing] = useState(false);
     const { t } = useTranslation();
     if (!account) return null;
 
@@ -144,6 +147,16 @@ export default function AccountErrorDialog({ account, onClose }: AccountErrorDia
             confirmText={t('common.close')}
         >
             <div className="space-y-4 max-h-[75vh] overflow-y-auto scrollbar-thin scrollbar-thumb-gray-200 dark:scrollbar-thumb-gray-700 pr-1 py-1">
+                <div className="p-3 rounded-xl bg-base-200 text-sm space-y-2">
+                    <strong>{accountHealth(account).title}</strong><p>{accountHealth(account).action}</p>
+                    <button className="btn btn-xs" disabled={refreshing} onClick={async () => {
+                        setRefreshing(true);
+                        try { await useAccountStore.getState().refreshQuota(account.id); showToast('额度已刷新，请继续实际生成复测', 'success'); }
+                        catch (error) { showToast(String(error), 'error'); }
+                        finally { setRefreshing(false); }
+                    }}>{refreshing ? '正在刷新…' : '验证后刷新额度'}</button>
+                    <a className="btn btn-xs ml-2" href="/admin/api-test">打开 API 生成测试</a>
+                </div>
                 {/* Account Info */}
                 <div>
                     <label className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider block mb-1.5 ml-1">

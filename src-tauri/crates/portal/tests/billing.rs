@@ -118,3 +118,53 @@ fn concurrent_settlements_preserve_all_charges_and_zero_balance_blocks() {
         Err(Error::InsufficientBalance)
     ));
 }
+
+#[test]
+fn interrupted_streams_release_charges_and_recovery_survives_reopen() {
+    let (dir, p) = common::portal();
+    let user = p
+        .store
+        .register("interrupt@example.com", "123456", db::now())
+        .unwrap();
+    let key = p.ensure_native_token(&user).unwrap().unwrap();
+    p.store
+        .credit_wallet(&user.id, 100, "stream-credit")
+        .unwrap();
+    for status in [499, 502] {
+        let id = p.store.begin_billing(&key.id, "stream").unwrap().unwrap();
+        p.store
+            .settle_billing(&id, status, Some((1000, 500, 200)))
+            .unwrap();
+        // A later duplicate success cannot change an already released request.
+        p.store
+            .settle_billing(&id, 200, Some((1000, 500, 200)))
+            .unwrap();
+    }
+    assert_eq!(
+        p.store.wallet_dashboard(&user.id).unwrap()["balance_nano"],
+        NANO_PER_YUAN
+    );
+    let id = p.store.begin_billing(&key.id, "restart").unwrap().unwrap();
+    let reopened = db::Store::open(dir.path().join("portal.db")).unwrap();
+    reopened.recover_billing().unwrap();
+    assert_eq!(
+        reopened.wallet_dashboard(&user.id).unwrap()["review_count"],
+        1
+    );
+    reopened
+        .settle_billing(&id, 200, Some((1000, 800, 50)))
+        .unwrap();
+    let wallet = reopened.wallet_dashboard(&user.id).unwrap();
+    let row = &wallet["usage"][0];
+    assert_eq!(row["uncached_tokens"], 200);
+    assert_eq!(row["breakdown"]["input_nano"], 120000);
+    assert_eq!(row["breakdown"]["cached_nano"], 48000);
+    assert_eq!(row["breakdown"]["output_nano"], 150000);
+    assert_eq!(row["charged_nano"], 318000);
+    assert!(row["settled_at"].is_i64());
+    assert_eq!(wallet["review_count"], 0);
+    assert!(matches!(
+        reopened.settle_billing(&id, 100, None),
+        Err(Error::Invalid(_))
+    ));
+}

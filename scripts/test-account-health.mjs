@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+const source = readFileSync(new URL('../src/utils/accountHealth.ts', import.meta.url), 'utf8');
+const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } }).outputText;
+const { accountHealth } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
+const account = { id: 'fixture', email: 'fixture@example.invalid', quota: {} };
+assert.equal(accountHealth({ ...account, validation_blocked: true, disabled: true }).state, 'validation');
+assert.equal(accountHealth({ ...account, disabled: true, disabled_reason: 'invalid_grant' }).state, 'refresh');
+assert.equal(accountHealth({ ...account, proxy_disabled: true }).state, 'disabled');
+assert.equal(accountHealth({ ...account, live_limited_models: { model: { until: 101 } } }, 100).state, 'limited');
+assert.equal(accountHealth({ ...account, live_limited_models: { model: { until: 99 } } }, 100).state, 'available');
+assert.equal(accountHealth({ ...account, quota: { is_forbidden: true } }).state, 'forbidden');
+console.log('Account recovery classification: 6 checks passed');

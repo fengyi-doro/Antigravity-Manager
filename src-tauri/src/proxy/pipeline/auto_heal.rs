@@ -141,6 +141,29 @@ fn inspect_gemini_candidate_parts(
 /// - 若正常产出正文或工具调用，全流程无任何额外开销；
 /// - 若发现仅产出思考后立即返回终止符，截留终止信号并在同一连接中自动续跑；
 /// - 续跑上限严格为 1 次，具有完备的熔断与兜底保障。
+fn guard_raw_stream<S, E>(
+    mut stream: Pin<Box<S>>,
+    holder: Option<crate::proxy::monitor::UpstreamRequestBodyHolder>,
+) -> Pin<Box<dyn Stream<Item = Result<Bytes, E>> + Send>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    Box::pin(async_stream::stream! {
+        let mut evidence = super::stream_completion::StreamCompletion::default();
+        while let Some(item) = stream.next().await {
+            match &item {
+                Ok(bytes) => evidence.observe(bytes),
+                Err(_) => if let Some(holder) = &holder { holder.mark_stream_failure("Upstream response stream interrupted"); },
+            }
+            yield item;
+        }
+        if !evidence.finish() {
+            if let Some(holder) = &holder { holder.mark_stream_failure("Upstream stream ended without a valid completion or reported an error"); }
+        }
+    })
+}
+
 pub fn wrap_stream_with_empty_thinking_auto_heal<S, E>(
     stream: Pin<Box<S>>,
     ctx: ThinkingAutoHealContext,
@@ -152,6 +175,9 @@ where
     let usage_holder = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
         .try_with(Clone::clone)
         .ok();
+    if let Some(holder) = &usage_holder {
+        holder.begin_generation_attempt();
+    }
     let stream = async_stream::stream! {
         let mut buffer = BytesMut::new();
         let mut saw_thought = false;
@@ -160,7 +186,7 @@ where
         let mut saw_finish_reason = false;
         let mut finish_reason_val: Option<String> = None;
 
-        let mut stream1 = stream;
+        let mut stream1 = guard_raw_stream(stream, usage_holder.clone());
         while let Some(item) = stream1.next().await {
             match item {
                 Ok(bytes) => {
@@ -179,8 +205,7 @@ where
                             continue;
                         }
 
-                        if line.starts_with("data: ") {
-                            let json_part = line.trim_start_matches("data: ").trim();
+                        if let Some(json_part) = line.strip_prefix("data:").map(str::trim) {
                             if json_part == "[DONE]" {
                                 if saw_content || saw_tool_call {
                                     yield Ok(Bytes::from("data: [DONE]\n\n"));
@@ -291,14 +316,19 @@ where
             let prompt = resolve_continuation_prompt(&ctx.original_body);
             let heal_body = create_auto_heal_continuation_body(&ctx.original_body, prompt);
 
-            let call_res = ctx.upstream.call_v1_internal_with_headers(
+            let continuation = ctx.upstream.call_v1_internal_with_headers(
                 ctx.method,
                 &ctx.access_token,
                 heal_body,
                 ctx.query_string,
                 ctx.extra_headers.clone(),
                 ctx.account_id.as_deref(),
-            ).await;
+            );
+            let call_res = if let Some(holder) = &usage_holder {
+                crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE.scope(holder.clone(), continuation).await
+            } else {
+                continuation.await
+            };
 
             match call_res {
                 Ok(call_success) if call_success.response.status().is_success() => {
@@ -307,7 +337,7 @@ where
                         "[{}] [Stream-AutoHeal] ✓ Continuation request succeeded (HTTP 200), piping healed stream directly into client connection...",
                         ctx.trace_id
                     );
-                    let mut stream2 = call_success.response.bytes_stream();
+                    let mut stream2 = guard_raw_stream(Box::pin(call_success.response.bytes_stream()), usage_holder.clone());
                     let mut stream2_saw_output = false;
                     let mut s2_buffer = BytesMut::new();
 
@@ -355,6 +385,7 @@ where
 
                     // 兜底防御：若续跑流依然未产出任何可视正文或工具调用，注入微小兜底避免客户端崩溃
                     if !stream2_saw_output {
+                        if let Some(holder) = &usage_holder { holder.mark_stream_failure("Upstream continuation returned no output"); }
                         tracing::warn!(
                             "[{}] [Stream-AutoHeal] Continuation stream also returned 0 output. Injecting fallback message to prevent client disconnect.",
                             ctx.trace_id
@@ -376,6 +407,7 @@ where
                     }
                 }
                 Ok(call_fail) => {
+                    if let Some(holder) = &usage_holder { holder.mark_stream_failure("Upstream continuation failed"); }
                     let status = call_fail.response.status();
                     tracing::error!(
                         "[{}] [Stream-AutoHeal] Continuation request returned HTTP {}. Injecting fallback message.",
@@ -401,6 +433,7 @@ where
                         "[{}] [Stream-AutoHeal] Continuation request failed: {}. Injecting fallback message.",
                         ctx.trace_id, e
                     );
+                    if let Some(holder) = &usage_holder { holder.mark_stream_failure("Upstream continuation failed"); }
                     let fallback_text = "task ready";
                     let fallback_chunk = format!(
                         "data: {}\n\n",

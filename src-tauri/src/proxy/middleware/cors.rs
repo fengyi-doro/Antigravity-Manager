@@ -16,6 +16,11 @@ pub fn cors_layer() -> CorsLayer {
             Method::PATCH,
         ])
         .allow_headers(Any)
+        .expose_headers([
+            axum::http::HeaderName::from_static("x-request-id"),
+            axum::http::HeaderName::from_static("x-mapped-model"),
+            axum::http::HeaderName::from_static("x-account-email"),
+        ])
         .allow_credentials(false)
         .max_age(std::time::Duration::from_secs(3600))
 }

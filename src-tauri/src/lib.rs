@@ -314,7 +314,8 @@ pub fn run() {
     match modules::account::get_data_dir() {
         Ok(data_dir) => {
             if let Err(e) = antigravity_portal::initialize(
-                &data_dir, std::sync::Arc::new(modules::portal_tokens::NativeUserTokens),
+                &data_dir,
+                std::sync::Arc::new(modules::portal_tokens::NativeUserTokens),
             ) {
                 error!("Failed to initialize user portal: {:?}", e);
             }

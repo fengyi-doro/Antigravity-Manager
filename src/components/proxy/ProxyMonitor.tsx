@@ -1,3 +1,4 @@
+import RequestDiagnostics, { type Diagnostics } from './RequestDiagnostics';
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import ModalDialog from '../common/ModalDialog';
@@ -15,6 +16,7 @@ import { extractConcisePayload } from './concisePayload';
 
 
 interface ProxyRequestLog {
+    diagnostics?: Diagnostics;
     id: string;
     timestamp: number;
     method: string;
@@ -1582,6 +1584,7 @@ export const ProxyMonitor: React.FC<ProxyMonitorProps> = ({ className }) => {
                         </div>
 
                         {/* Modal Content */}
+                        <RequestDiagnostics requestId={selectedLog.id} diagnostics={selectedLog.diagnostics} />
                         <div className="flex-1 min-h-0 flex flex-col p-3 sm:p-4 space-y-2.5 bg-gray-100/50 dark:bg-base-100 overflow-hidden">
                             {/* Metadata Section (Collapsible) */}
                             {showMetadata && (

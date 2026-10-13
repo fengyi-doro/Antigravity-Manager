@@ -19,14 +19,14 @@ const MAX_LOGGED_FIELD_CHARS: usize = 500;
 async fn next_chunk_while_receiver_open<S, T>(
     stream: &mut S,
     tx: &tokio::sync::mpsc::Sender<T>,
-) -> Option<S::Item>
+) -> Result<Option<S::Item>, ()>
 where
     S: Stream + Unpin,
 {
     tokio::select! {
         biased;
-        _ = tx.closed() => None,
-        chunk = stream.next() => chunk,
+        _ = tx.closed() => Err(()),
+        chunk = stream.next() => Ok(chunk),
     }
 }
 
@@ -294,10 +294,17 @@ fn summarize_image_json_response(json: &Value) -> Option<String> {
 /// Helper function to record User Token usage
 fn record_user_token_usage(
     user_token_identity: &Option<UserTokenIdentity>,
-    log: &ProxyRequestLog,
+    log: &mut ProxyRequestLog,
     user_agent: Option<String>,
     upstream_holder: &UpstreamRequestBodyHolder,
 ) {
+    if (200..300).contains(&log.status) {
+        if let Some(reason) = upstream_holder.stream_failure() {
+            log.status = 502;
+            log.error = Some(reason);
+        }
+    }
+    log.diagnostics = Some(upstream_holder.diagnostics(log.status, log.error.as_deref()));
     upstream_holder.settle_billing(log.status);
     if let Some(identity) = user_token_identity {
         let _ = crate::modules::user_token_db::record_token_usage_and_ip(
@@ -732,8 +739,15 @@ pub async fn monitor_middleware(
 
     let method = request.method().to_string();
     let uri = request.uri().to_string();
+    let path = request.uri().path().to_owned();
 
-    if uri.contains("event_logging") || uri.contains("/api/") || uri.starts_with("/internal/") {
+    if path.starts_with("/api/")
+        || path.starts_with("/internal/")
+        || matches!(
+            path.as_str(),
+            "/v1/api/event_logging" | "/v1/api/event_logging/batch"
+        )
+    {
         return next.run(request).await;
     }
 
@@ -851,19 +865,17 @@ pub async fn monitor_middleware(
 
     let upstream_holder = UpstreamRequestBodyHolder::new();
     // Count/model discovery endpoints are free. Admission fails closed if accounting is unavailable.
-    if method == "POST"
-        && !uri.contains("count_tokens")
-        && !uri.contains("countTokens")
-        && !uri.starts_with("/v1/thinking/")
-        && !uri.starts_with("/v1/models/detect")
-    {
+    if crate::proxy::billing_policy::is_billable(&method, &path) {
         if let Some(identity) = &user_token_identity {
             let token = identity.token_id.clone();
             let requested_model = model.clone().unwrap_or_else(|| "unknown".into());
             let admission = antigravity_portal::blocking(move || {
-                antigravity_portal::instance()?
-                    .store
-                    .begin_billing(&token, &requested_model)
+                let portal = antigravity_portal::instance()?;
+                portal.store.begin_billing_with_policy(
+                    &token,
+                    &requested_model,
+                    portal.config.require_email_verification,
+                )
             })
             .await;
             match admission {
@@ -875,9 +887,15 @@ pub async fn monitor_middleware(
     let mut request = request;
     request.extensions_mut().insert(upstream_holder.clone());
 
-    let response = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
+    let request_id = upstream_holder
+        .billing_id()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut response = crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE
         .scope(upstream_holder.clone(), next.run(request))
         .await;
+    if let Ok(id) = axum::http::HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert("x-request-id", id);
+    }
     let upstream_request_body = upstream_holder.take();
     let upstream_request_headers = upstream_holder.take_headers();
     let response_headers_json =
@@ -949,7 +967,7 @@ pub async fn monitor_middleware(
 
     let monitor = state.monitor.clone();
     let mut log = ProxyRequestLog {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: request_id,
         timestamp: chrono::Utc::now().timestamp_millis(),
         method,
         url: uri,
@@ -972,6 +990,7 @@ pub async fn monitor_middleware(
         protocol,
         username,
         session_id,
+        diagnostics: None,
     };
 
     if content_type.contains("text/event-stream") {
@@ -985,7 +1004,16 @@ pub async fn monitor_middleware(
             let mut all_stream_data = Vec::new();
             let mut last_few_bytes = Vec::new();
 
-            while let Some(chunk_res) = next_chunk_while_receiver_open(&mut stream, &tx).await {
+            loop {
+                let chunk_res = match next_chunk_while_receiver_open(&mut stream, &tx).await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(()) => {
+                        log.status = 499;
+                        log.error = Some("Client disconnected before stream completion".into());
+                        break;
+                    }
+                };
                 if let Ok(chunk) = chunk_res {
                     all_stream_data.extend_from_slice(&chunk);
 
@@ -998,12 +1026,15 @@ pub async fn monitor_middleware(
                         }
                     }
                     if tx.send(Ok::<_, axum::Error>(chunk)).await.is_err() {
+                        log.status = 499;
+                        log.error = Some("Client disconnected before stream completion".into());
                         break;
                     }
                 } else if let Err(e) = chunk_res {
-                    if tx.send(Err(axum::Error::new(e))).await.is_err() {
-                        break;
-                    }
+                    log.status = 502;
+                    log.error = Some("Upstream response stream interrupted".into());
+                    let _ = tx.send(Err(axum::Error::new(e))).await;
+                    break;
                 }
             }
             drop(stream);
@@ -1038,15 +1069,21 @@ pub async fn monitor_middleware(
                 let mut reasoning_tokens: Option<u32> = None;
 
                 for line in full_response.lines() {
-                    if !line.starts_with("data: ") {
+                    let Some(json_str) = line.strip_prefix("data:").map(str::trim) else {
                         continue;
-                    }
-                    let json_str = line.trim_start_matches("data: ").trim();
+                    };
                     if json_str == "[DONE]" {
                         continue;
                     }
 
                     if let Ok(json) = serde_json::from_str::<Value>(json_str) {
+                        if crate::proxy::diagnostics::response_failed(&json) {
+                            if (200..300).contains(&log.status) {
+                                log.status = 502;
+                            }
+                            log.error =
+                                Some("Upstream reported an error in the response stream".into());
+                        }
                         // OpenAI format: choices[0].delta.content / reasoning_content / tool_calls
                         if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
                             for choice in choices {
@@ -1552,7 +1589,7 @@ pub async fn monitor_middleware(
                 }
             }
 
-            if log.status >= 400 {
+            if log.status >= 400 && log.error.is_none() {
                 log.error = Some("Stream Error or Failed".to_string());
             }
 
@@ -1576,7 +1613,7 @@ pub async fn monitor_middleware(
             // Record User Token Usage
             record_user_token_usage(
                 &user_token_identity,
-                &log,
+                &mut log,
                 user_agent.clone(),
                 &upstream_holder,
             );
@@ -1609,6 +1646,12 @@ pub async fn monitor_middleware(
             Ok(bytes) => {
                 if let Ok(s) = std::str::from_utf8(&bytes) {
                     if let Ok(json) = serde_json::from_str::<Value>(&s) {
+                        if (200..300).contains(&log.status)
+                            && crate::proxy::diagnostics::response_failed(&json)
+                        {
+                            log.status = 502;
+                            log.error = Some("Response contained a generation failure".into());
+                        }
                         // 支持 OpenAI "usage" 或 Gemini "usageMetadata"
                         if let Some(usage) = json
                             .get("usage")
@@ -1677,7 +1720,7 @@ pub async fn monitor_middleware(
                 // Record User Token Usage
                 record_user_token_usage(
                     &user_token_identity,
-                    &log,
+                    &mut log,
                     user_agent.clone(),
                     &upstream_holder,
                 );
@@ -1686,25 +1729,36 @@ pub async fn monitor_middleware(
                 Response::from_parts(parts, Body::from(bytes))
             }
             Err(_) => {
-                log.response_body = Some("[Response too large (>100MB)]".to_string());
+                log.status = 502;
+                log.error =
+                    Some("Upstream response body interrupted or exceeded the 100MB limit".into());
+                log.response_body = log.error.clone();
 
                 // Record User Token Usage (even if too large)
                 record_user_token_usage(
                     &user_token_identity,
-                    &log,
+                    &mut log,
                     user_agent.clone(),
                     &upstream_holder,
                 );
 
                 monitor.log_request(log).await;
-                Response::from_parts(parts, Body::empty())
+                let mut parts = parts;
+                parts.status = axum::http::StatusCode::BAD_GATEWAY;
+                parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+                parts.headers.remove(axum::http::header::CONTENT_ENCODING);
+                parts.headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/json"),
+                );
+                Response::from_parts(parts, Body::from(serde_json::json!({"error":{"code":"upstream_response_error","message":"Unable to read upstream response"}}).to_string()))
             }
         }
     } else {
         log.response_body = Some(format!("[{}]", content_type));
 
         // Record User Token Usage
-        record_user_token_usage(&user_token_identity, &log, user_agent, &upstream_holder);
+        record_user_token_usage(&user_token_identity, &mut log, user_agent, &upstream_holder);
 
         monitor.log_request(log).await;
         response
@@ -1748,7 +1802,7 @@ mod tests {
 
             assert!(next_chunk_while_receiver_open(&mut source, &tx)
                 .await
-                .is_none());
+                .is_err());
         });
 
         polled_rx.await.expect("source stream was not polled");
@@ -1758,6 +1812,16 @@ mod tests {
             .expect("forwarder did not stop after receiver closed")
             .expect("forwarder task panicked");
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn normal_stream_end_is_distinct_from_client_cancellation() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<()>(1);
+        let mut source = stream::empty::<()>();
+        assert!(matches!(
+            next_chunk_while_receiver_open(&mut source, &tx).await,
+            Ok(None)
+        ));
     }
 
     #[test]

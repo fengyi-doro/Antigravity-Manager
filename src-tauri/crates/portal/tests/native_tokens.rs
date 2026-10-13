@@ -112,7 +112,7 @@ fn existing_accounts_link_once_without_mutating_legacy_financial_records() {
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        5
     );
     assert_eq!(
         conn.query_row("SELECT enabled FROM api_keys WHERE id='key'", [], |r| r

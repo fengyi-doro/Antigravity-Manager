@@ -1,18 +1,19 @@
+import AccountRecovery from './AccountRecovery';
+import WalletHistory, { type WalletHistoryData } from './WalletHistory';
 import { useCallback, useEffect, useState } from "react";
 import "./portal.css";
+import { billingState, money, type Wallet } from "./billing";
 
 type Usage = { id: string; model: string; input_tokens: number | null; output_tokens: number | null; request_time: number; status: number };
 type NativeToken = { id: string; suffix: string; enabled: boolean; expires_at: number | null; total_requests: number; total_tokens_used: number; last_used_at: number | null; usage: Usage[] };
 type Legacy = { paid_available: number; usage: { id: string; model: string; charged: number | null; created_at: number }[]; orders: { id: string; amount_cents: number; state: string; created_at: number }[] };
-type Wallet = { enabled: boolean; balance_nano: number; spent_nano: number; usage: { id: string; model: string; input_tokens: number | null; cached_tokens: number | null; output_tokens: number | null; charged_nano: number | null; status: number | null; state: string; created_at: number }[] };
-type Snapshot = { user: { email: string }; csrf: string; data: { key: NativeToken | null; legacy: Legacy; wallet: Wallet } };
-type Config = { registration_open: boolean; api_base_url: string };
+type Snapshot = { email_verified: boolean; user: { email: string }; csrf: string; data: { history: WalletHistoryData; key: NativeToken | null; legacy: Legacy; wallet: Wallet } };
+type Config = { email_enabled: boolean; email_verification_required: boolean; registration_open: boolean; api_base_url: string };
 const number = (value: number) => new Intl.NumberFormat("zh-CN").format(value);
-const money = (nano: number) => new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", minimumFractionDigits: 2, maximumFractionDigits: 8 }).format(nano / 1_000_000_000);
 const date = (value: number) => new Date(value * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
 const orderStatus: Record<string, string> = { pending: "待支付", paid: "已到账", closed: "已关闭" };
 
-async function api<T>(path: string, method = "GET", body?: unknown, csrf?: string): Promise<T> {
+export async function api<T>(path: string, method = "GET", body?: unknown, csrf?: string): Promise<T> {
   const response = await fetch(`/portal/api${path}`, {
     method, credentials: "same-origin", cache: "no-store",
     headers: { ...(body ? { "Content-Type": "application/json" } : {}), ...(csrf ? { "X-Portal-CSRF": csrf } : {}) },
@@ -91,7 +92,8 @@ export default function Portal() {
   const legacy = snapshot?.data.legacy;
   const wallet = snapshot?.data.wallet;
   const expired = key?.expires_at != null && key.expires_at <= Date.now() / 1000;
-  const keyStatus = !key ? "尚无密钥" : !key.enabled ? "已停用" : expired ? "已到期" : wallet?.enabled && wallet.balance_nano <= 0 ? "余额不足" : "正常";
+  const verificationPending = !!config?.email_verification_required && !snapshot?.email_verified;
+  const keyStatus = verificationPending ? "待验证邮箱" : !key ? "尚无密钥" : !key.enabled ? "已停用" : expired ? "已到期" : wallet?.enabled && wallet.balance_nano <= 0 ? "余额不足" : "正常";
   return (
     <div className="portal-app"><div className="portal-shell">
       <header className="portal-header">
@@ -113,6 +115,7 @@ export default function Portal() {
               <button className="portal-primary" disabled={busy || (register && config?.registration_open === false)}>{busy ? "请稍候…" : register ? "注册" : "登录"}</button>
             </form>
             <button className="portal-text-button" onClick={() => { setRegister(!register); setError(""); window.history.replaceState({}, "", register ? "/console" : "/register"); }}>{register ? "已有账号？登录" : "还没有账号？注册"}</button>
+            <AccountRecovery key="recovery" enabled={!!config?.email_enabled} email={email} signedIn={false} reload={reload} />
           </div>
           <WelcomeCharacter />
         </main>
@@ -125,6 +128,7 @@ export default function Portal() {
             <div><span className="portal-muted">{wallet?.enabled ? "累计消费" : "累计请求"}</span><strong>{wallet?.enabled ? money(wallet.spent_nano) : number(key?.total_requests ?? 0)}</strong><small>最近调用：{key?.last_used_at ? date(key.last_used_at) : "暂无"}</small></div>
             <div><span className="portal-muted">密钥状态</span><strong>{keyStatus}</strong><small>{key?.expires_at ? `${date(key.expires_at)} 到期` : key ? "长期有效" : "请创建密钥"}</small></div>
           </section>
+          <AccountRecovery key="verification" enabled={!!config?.email_enabled} email={snapshot.user.email} csrf={snapshot.csrf} verified={snapshot.email_verified} signedIn reload={reload} />
           {wallet?.enabled && <section className="portal-section"><h2>计费标准</h2>
             <div className="portal-record"><span>普通输入，未命中缓存</span><strong>¥0.60 / 百万 token</strong></div>
             <div className="portal-record"><span>缓存命中的输入</span><strong>¥0.06 / 百万 token</strong></div>
@@ -136,10 +140,10 @@ export default function Portal() {
             <div className="portal-value-row"><div><span className="portal-muted">API Key</span><code>{shownKey || (key ? `sk-••••••••${key.suffix}` : "尚无密钥")}</code></div>
               <div className="portal-actions">
                 {key && <button className="portal-secondary" disabled={busy} onClick={() => perform(async () => { const result = await api<{ api_key: string }>("/key"); setFullKey({ id: key.id, value: result.api_key }); await copy(result.api_key); })}>查看并复制</button>}
-                <button className="portal-secondary" disabled={busy} onClick={() => {
+                <button className="portal-secondary" disabled={busy || verificationPending} onClick={() => {
                   if (key && !window.confirm("重置后原密钥会立即停用，用量记录仍保留，原有访问限制继续生效。确认重置？")) return;
                   void perform(async () => { const result = await api<{ api_key: string }>("/key", "POST", {}, snapshot.csrf); const updated = await reload(); if (updated.data.key) setFullKey({ id: updated.data.key.id, value: result.api_key }); setNotice("新密钥已创建，请更新客户端配置。"); });
-                }}>{key ? "重置密钥" : "创建密钥"}</button>
+                }}>{verificationPending ? "验证邮箱后创建" : key ? "重置密钥" : "创建密钥"}</button>
                 {key?.enabled && <button className="portal-text-button" disabled={busy} onClick={() => {
                   if (!window.confirm("停用后使用此密钥的客户端将无法继续调用，确认停用？")) return;
                   void perform(async () => { await api("/key", "DELETE", undefined, snapshot.csrf); setFullKey(null); await reload(); });
@@ -150,14 +154,20 @@ export default function Portal() {
             <p className="portal-muted">在兼容客户端填写接口地址和 API Key。可用模型通过模型列表接口查询。</p>
           </section>
           <section className="portal-section"><h2>调用记录</h2>
+            {Boolean(wallet?.review_count) && <p role="status" className="portal-alert">有 {wallet?.review_count} 笔调用费用待核对，请联系管理员并提供下方请求编号。核对完成前暂停新的计费调用。</p>}
             {wallet?.enabled ? <div className="portal-records">{wallet.usage.length ? wallet.usage.map((row) => <div className="portal-record" key={row.id}>
-              <div><strong>{row.model}</strong><small>{date(row.created_at)}</small></div>
-              <div><strong>输入 {number(row.input_tokens ?? 0)} · 缓存 {number(row.cached_tokens ?? 0)} · 输出 {number(row.output_tokens ?? 0)}</strong><small>{row.state === "settled" ? `费用 ${money(row.charged_nano ?? 0)}` : row.state === "released" ? "未收费" : row.state === "review" ? "费用待核对" : "调用中"}{row.status != null ? ` · HTTP ${row.status}` : ""}</small></div>
+              <div><strong>{row.model}</strong><small>{date(row.created_at)}</small><small>请求编号 <code>{row.id}</code></small></div>
+              <div><strong>普通输入 {row.uncached_tokens == null ? "—" : number(row.uncached_tokens)} · 缓存 {row.cached_tokens == null ? "—" : number(row.cached_tokens)} · 输出 {row.output_tokens == null ? "—" : number(row.output_tokens)}</strong>
+                <small>{billingState[row.state] || row.state}{row.charged_nano != null ? ` · ${money(row.charged_nano)}` : ""}{row.status != null ? ` · HTTP ${row.status}` : ""}</small>
+                {row.breakdown && <small>普通输入 {money(row.breakdown.input_nano)} + 缓存 {money(row.breakdown.cached_nano)} + 输出 {money(row.breakdown.output_nano)}</small>}
+                {row.settled_at != null && <small>结算于 {date(row.settled_at)}</small>}
+              </div>
             </div>) : <p className="portal-empty">还没有调用记录</p>}</div> : <div className="portal-records">{key?.usage.length ? key.usage.map((row) => <div className="portal-record" key={row.id}>
               <div><strong>{row.model || "unknown"}</strong><small>{date(row.request_time)}</small></div>
               <div><strong>输入 {number(row.input_tokens ?? 0)} · 输出 {number(row.output_tokens ?? 0)}</strong><small>HTTP {row.status}</small></div>
             </div>) : <p className="portal-empty">还没有调用记录</p>}</div>}
           </section>
+          <WalletHistory history={snapshot.data.history} busy={busy} request={async (credit_reference, amount_cents, reason) => { await api("/refunds", "POST", { credit_reference, amount_cents, reason }, snapshot.csrf); await reload(); setNotice("退款申请已提交，等待管理员审核。"); }} />
           {legacy && (legacy.paid_available > 0 || legacy.orders.length > 0 || legacy.usage.length > 0) && (
             <details className="portal-section"><summary>历史账户记录</summary>
               <p className="portal-muted">独立充值与扣费已停用。以下记录仅供查看，不参与当前 API 用量统计。</p>

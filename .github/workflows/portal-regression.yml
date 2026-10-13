@@ -1,0 +1,34 @@
+name: Portal billing regression
+on:
+  push:
+    branches: [beta, main]
+    paths: ['src-tauri/crates/portal/**', 'src-tauri/src/modules/user_token_db.rs', 'src-tauri/src/modules/portal_tokens.rs', 'src-tauri/src/proxy/pipeline/usage.rs', 'src-tauri/src/proxy/middleware/monitor.rs', 'src-tauri/src/proxy/diagnostics.rs', 'src-tauri/src/modules/proxy_db.rs', 'src-tauri/src/modules/proxy_log_filter.rs', 'src/portal/**', 'src/utils/apiTest.ts', 'src/utils/accountHealth.ts', 'scripts/test-api-test.mjs', 'scripts/test-account-health.mjs', '.github/workflows/portal-regression.yml']
+  pull_request:
+    branches: [beta, main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  frontend-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --legacy-peer-deps
+      - run: node scripts/test-api-test.mjs
+      - run: node scripts/test-account-health.mjs
+  portal-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri/crates/portal
+      - name: Native keys, billing, recovery and account isolation
+        run: cargo test --manifest-path src-tauri/crates/portal/Cargo.toml -- --test-threads=1

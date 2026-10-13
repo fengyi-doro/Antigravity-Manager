@@ -480,11 +480,25 @@ impl UpstreamClient {
                     req_builder = req_builder.body(body_bytes.clone());
                 }
 
+                let attempt_started = std::time::Instant::now();
                 let response = req_builder.send().await;
 
                 match response {
                     Ok(resp) => {
                         let status = resp.status();
+                        let _ =
+                            crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE.try_with(|holder| {
+                                holder.record_attempt(
+                                    crate::proxy::diagnostics::UpstreamAttempt::new(
+                                        target_model_str,
+                                        account_id,
+                                        base_url,
+                                        Some(status.as_u16()),
+                                        attempt_started.elapsed().as_millis() as u64,
+                                        crate::proxy::diagnostics::error_class(status.as_u16(), ""),
+                                    ),
+                                );
+                            });
                         if status.is_success() {
                             if idx > 0 {
                                 tracing::info!(
@@ -546,6 +560,19 @@ impl UpstreamClient {
                         });
                     }
                     Err(e) => {
+                        let _ =
+                            crate::proxy::monitor::CURRENT_UPSTREAM_CAPTURE.try_with(|holder| {
+                                holder.record_attempt(
+                                    crate::proxy::diagnostics::UpstreamAttempt::new(
+                                        target_model_str,
+                                        account_id,
+                                        base_url,
+                                        None,
+                                        attempt_started.elapsed().as_millis() as u64,
+                                        if e.is_timeout() { "timeout" } else { "network" },
+                                    ),
+                                );
+                            });
                         let msg = format!("HTTP request failed at {}: {}", base_url, e);
                         tracing::debug!("{}", msg);
                         // [NEW] 记录网络错误的降级尝试

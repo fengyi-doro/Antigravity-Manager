@@ -2,6 +2,7 @@ export type TestProtocol = 'chat' | 'responses' | 'claude' | 'gemini';
 export type TestAuth = 'bearer' | 'x-api-key' | 'x-goog-api-key';
 
 export interface TestResult {
+    requestId: string;
     status: number;
     elapsedMs: number;
     url: string;
@@ -109,7 +110,7 @@ export async function apiTestRequest(options: {
     return {
         ...inspected, status: response.status, elapsedMs: Math.round(performance.now() - started), url, model,
         mappedModel: response.headers.get('x-mapped-model') ?? '', account: response.headers.get('x-account-email') ?? '',
-        keySuffix: key.slice(-4), truncated, time: new Date().toLocaleTimeString(),
+        requestId: response.headers.get('x-request-id') ?? '', keySuffix: key.slice(-4), truncated, time: new Date().toLocaleTimeString(),
     };
 }
 

@@ -29,6 +29,8 @@ pub fn portal() -> (tempfile::TempDir, Arc<Portal>) {
             secure_cookie: true,
             registration_open: true,
             trust_proxy: false,
+            mail: None,
+            require_email_verification: false,
         },
         Some(Arc::new(adapter::NativeUserTokens)),
     ));

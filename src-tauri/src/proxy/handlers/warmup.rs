@@ -97,6 +97,7 @@ pub async fn handle_warmup(
                         upstream_request_headers: None,
                         response_headers: None,
                         session_id: None,
+                        diagnostics: None,
                     };
                     state.monitor.log_request(log).await;
 
@@ -194,6 +195,7 @@ pub async fn handle_warmup(
                     upstream_request_headers: None,
                     response_headers: None,
                     session_id: None,
+                    diagnostics: None,
                 };
                 state.monitor.log_request(log).await;
 
@@ -337,6 +339,7 @@ pub async fn handle_warmup(
                     upstream_request_headers: None,
                     response_headers: None,
                     session_id: None,
+                    diagnostics: None,
                 };
                 state.monitor.log_request(log).await;
 
@@ -428,6 +431,7 @@ pub async fn handle_warmup(
                     upstream_request_headers: None,
                     response_headers: None,
                     session_id: None,
+                    diagnostics: None,
                 };
                 state.monitor.log_request(log).await;
 
@@ -492,6 +496,7 @@ pub async fn handle_warmup(
                 upstream_request_headers: None,
                 response_headers: None,
                 session_id: None,
+                diagnostics: None,
             };
             state.monitor.log_request(log).await;
 

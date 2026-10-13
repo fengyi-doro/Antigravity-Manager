@@ -506,3 +506,16 @@
     padding: 22px;
   }
 }
+
+.portal-recovery form { display: grid; gap: 14px; margin-top: 18px; max-width: 420px; }
+.portal-recovery label { display: grid; gap: 7px; }
+.portal-recovery input { width: 100%; border: 1px solid #dce5e0; border-radius: 8px; padding: 11px 12px; background: var(--portal-bg, #fff); color: inherit; }
+
+.portal-input { width: 100%; font: inherit; color: inherit; background: white; border: 1px solid #dce5e0; border-radius: 8px; padding: 10px 12px; }
+.portal-table-scroll { overflow-x: auto; border: 1px solid #e1e8e4; border-radius: 10px; margin-top: 18px; }
+.portal-history-table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+.portal-history-table th { background: #f0f5f2; color: #667871; font-weight: 500; padding: 12px 14px; white-space: nowrap; }
+.portal-history-table td { padding: 14px; vertical-align: top; border-top: 1px solid #e9eeeb; }
+.portal-history-table .portal-secondary { min-height: 32px; padding: 5px 10px; font-size: 12px; }
+.portal-state { display: inline-flex; padding: 2px 8px; border-radius: 999px; color: #295b45; background: #e9f4ee; white-space: nowrap; }
+.portal-history h2 { margin-bottom: 10px; }

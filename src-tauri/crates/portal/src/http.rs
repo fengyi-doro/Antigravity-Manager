@@ -23,6 +23,8 @@ pub struct Config {
     pub secure_cookie: bool,
     pub registration_open: bool,
     pub trust_proxy: bool,
+    pub mail: Option<crate::mail::MailConfig>,
+    pub require_email_verification: bool,
 }
 impl Config {
     pub fn from_env() -> Result<Self> {
@@ -44,7 +46,16 @@ impl Config {
                 "用户中心应配置 HTTPS 域名，HTTP 仅允许本机测试".into(),
             ));
         }
+        let mail = crate::mail::MailConfig::from_env()?;
+        let require_email_verification = std::env::var("ABV_PORTAL_REQUIRE_EMAIL_VERIFICATION")
+            .map(|v| v != "false")
+            .unwrap_or(mail.is_some());
+        if require_email_verification && mail.is_none() {
+            return Err(Error::Invalid("启用邮箱验证前必须配置 SMTP".into()));
+        }
         Ok(Self {
+            mail,
+            require_email_verification,
             api_base_url: std::env::var("ABV_PORTAL_API_BASE_URL")
                 .unwrap_or_else(|_| format!("{public_url}/v1")),
             secure_cookie: url.scheme() == "https",
@@ -66,6 +77,7 @@ async fn unavailable() -> Error {
 }
 pub fn router_with(portal: Arc<Portal>) -> Router {
     Router::new()
+        .merge(crate::account_http::public_routes())
         .route("/portal/api/config", get(config))
         .route("/portal/api/auth/register", post(register))
         .route("/portal/api/auth/login", post(login))
@@ -99,7 +111,7 @@ async fn cache_headers(request: Request, next: Next) -> Response {
         .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     response
 }
-fn origin(p: &Portal, headers: &HeaderMap) -> Result<()> {
+pub(crate) fn origin(p: &Portal, headers: &HeaderMap) -> Result<()> {
     if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
         != Some(p.config.public_url.as_str())
     {
@@ -118,7 +130,7 @@ fn cookie(headers: &HeaderMap) -> Result<String> {
         .map(str::to_owned)
         .ok_or(Error::Unauthorized)
 }
-async fn authenticated(
+pub(crate) async fn authenticated(
     p: Arc<Portal>,
     headers: &HeaderMap,
     mutation: bool,
@@ -151,8 +163,10 @@ fn cookie_header(config: &Config, token: &str, age: i64) -> Result<HeaderValue> 
     .map_err(|_| Error::Internal("Invalid session cookie".into()))
 }
 async fn config(State(p): State<Arc<Portal>>) -> Result<Json<Value>> {
-    Ok(Json(json!({"registration_open":p.config.registration_open,
-        "billing_enabled":true,"pricing":crate::billing::pricing(),"payment_enabled":false,"api_base_url":p.config.api_base_url})))
+    Ok(Json(
+        json!({"registration_open":p.config.registration_open,"email_enabled":p.config.mail.is_some(),"email_verification_required":p.config.require_email_verification,
+        "billing_enabled":true,"pricing":crate::billing::pricing(),"payment_enabled":false,"api_base_url":p.config.api_base_url}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -160,7 +174,11 @@ struct Credentials {
     email: String,
     password: String,
 }
-fn client_bucket(p: &Portal, headers: &HeaderMap, peer: Option<ConnectInfo<SocketAddr>>) -> String {
+pub(crate) fn client_bucket(
+    p: &Portal,
+    headers: &HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
+) -> String {
     // Forwarded addresses are accepted only after the operator explicitly trusts the reverse proxy.
     let forwarded = if p.config.trust_proxy {
         headers
@@ -192,14 +210,17 @@ async fn register(
     let (user, token, csrf, key) = blocking(move || {
         store.rate_limit(&bucket, 3, 86_400, db::now())?;
         let user = store.register(&body.email, &body.password, db::now())?;
+        if portal.config.mail.is_some() {
+            store.require_verification(&user.id)?;
+        }
         let (token, csrf) = store.create_session(&user.id, db::now())?;
-        let key = portal
-            .ensure_native_token(&user)?
-            .ok_or_else(|| Error::Internal("原版 Token 不存在".into()))?
-            .token;
+        let key = portal.ensure_native_token(&user)?.map(|token| token.token);
         Ok((user, token, csrf, key))
     })
     .await?;
+    if p.config.mail.is_some() {
+        crate::account_http::queue_mail(p.clone(), user.email.clone(), "verify").await?;
+    }
     let mut response = (
         StatusCode::CREATED,
         Json(json!({"user":user,"csrf":csrf,"api_key":key})),
@@ -259,8 +280,11 @@ async fn logout(State(p): State<Arc<Portal>>, headers: HeaderMap) -> Result<Resp
 async fn me(State(p): State<Arc<Portal>>, headers: HeaderMap) -> Result<Json<Value>> {
     let (user, csrf) = authenticated(p.clone(), &headers, false).await?;
     let id = user.id.clone();
-    let data = blocking(move || p.native_dashboard(&id)).await?;
-    Ok(Json(json!({"user":user,"csrf":csrf,"data":data})))
+    let (data, email_verified) =
+        blocking(move || Ok((p.native_dashboard(&id)?, p.store.email_verified(&id)?))).await?;
+    Ok(Json(
+        json!({"user":user,"csrf":csrf,"data":data,"email_verified":email_verified}),
+    ))
 }
 async fn rotate_key(State(p): State<Arc<Portal>>, headers: HeaderMap) -> Result<Json<Value>> {
     let (user, _) = authenticated(p.clone(), &headers, true).await?;
@@ -298,6 +322,11 @@ pub fn admin_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/portal/users/:id", get(admin_user).patch(admin_enable))
         .route("/portal/users/:id/credits", post(admin_credit))
         .route("/portal/requests/:id/settle", post(admin_settle))
+        .merge(
+            instance()
+                .map(crate::account_http::admin_router_with)
+                .unwrap_or_default(),
+        )
 }
 #[derive(Deserialize)]
 struct CreditInput {
